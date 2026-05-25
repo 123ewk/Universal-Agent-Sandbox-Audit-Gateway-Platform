@@ -44,6 +44,7 @@ def get_or_generate_request_id() -> str:
     """
     rid = _request_id_ctx.get()
     if not rid:
+        # 这种做法降低了唯一性保证：完整 UUID4 的冲突概率极低，但取前 16 位后，冲突概率会显著上升，不适合对唯一性要求极高的场景
         rid = uuid4().hex[:16]
         _request_id_ctx.set(rid)
     return rid
