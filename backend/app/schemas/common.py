@@ -54,8 +54,8 @@ class PaginatedData(BaseModel, Generic[T]):
     page: int
     page_size: int
 
-    @computed_field
-    @property
+    @computed_field # 把 @property 方法暴露到模型的 JSON 序列化结果里。(total_pages 会自动出现在 JSON 里)
+    @property # 把一个方法伪装成一个属性。
     def total_pages(self) -> int:
         """计算总页数，向上取整"""
         if self.page_size <= 0:
