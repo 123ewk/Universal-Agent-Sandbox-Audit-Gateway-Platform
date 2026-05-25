@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+venv/
+.pytest_cache/
+
+# IDE
+.vscode/
+.idea/
+.trae/
+
+# Env
+.env
+*.env.local
+
+# Data
+data/screenshots/*
+!data/screenshots/.gitkeep
+
+# OS
+.DS_Store
+Thumbs.db
