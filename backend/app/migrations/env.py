@@ -1,0 +1,72 @@
+"""
+Alembic 异步迁移配置
+使用项目的配置模块动态获取数据库连接 URL，无需在 alembic.ini 中硬编码
+"""
+import asyncio
+from logging.config import fileConfig
+
+from sqlalchemy import pool
+from sqlalchemy.engine import Connection
+from sqlalchemy.ext.asyncio import async_engine_from_config
+
+from alembic import context
+
+# ==================== 项目配置 ====================
+from app.config import settings
+from app.models.base import Base
+
+# this is the Alembic Config object
+config = context.config
+
+# 移除 alembic.ini 中的硬编码 URL，用 settings 动态注入
+# 使用 async URL（postgresql+asyncpg://）让 async_engine_from_config 正常创建异步引擎
+config.set_main_option("sqlalchemy.url", settings.database_url)
+
+# Interpret the config file for Python logging
+if config.config_file_name is not None:
+    fileConfig(config.config_file_name)
+
+# 为 auto-generate 提供 target_metadata
+target_metadata = Base.metadata
+
+
+def run_migrations_offline() -> None:
+    """离线模式：只生成迁移脚本，不连接数据库"""
+    url = config.get_main_option("sqlalchemy.url")
+    context.configure(
+        url=url,
+        target_metadata=target_metadata,
+        literal_binds=True,
+        dialect_opts={"paramstyle": "named"},
+    )
+    with context.begin_transaction():
+        context.run_migrations()
+
+
+def do_run_migrations(connection: Connection) -> None:
+    context.configure(connection=connection, target_metadata=target_metadata)
+    with context.begin_transaction():
+        context.run_migrations()
+
+
+async def run_async_migrations() -> None:
+    """在线模式：连接数据库执行迁移"""
+    connectable = async_engine_from_config(
+        config.get_section(config.config_ini_section, {}),
+        prefix="sqlalchemy.",
+        poolclass=pool.NullPool,
+    )
+    async with connectable.connect() as connection:
+        await connection.run_sync(do_run_migrations)
+    await connectable.dispose()
+
+
+def run_migrations_online() -> None:
+    """在线模式入口"""
+    asyncio.run(run_async_migrations())
+
+
+if context.is_offline_mode():
+    run_migrations_offline()
+else:
+    run_migrations_online()
