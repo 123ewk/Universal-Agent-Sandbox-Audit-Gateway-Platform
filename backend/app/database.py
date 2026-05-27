@@ -58,7 +58,7 @@ async def init_db() -> None:
     from app.models.base import Base  # noqa: F811 — 延迟导入，避免循环依赖
 
     async with _engine.begin() as conn:
-        # 对 async engine，表创建操作需要在连接中执行
+        # 对 async engine，表创建操作需要在连接中执行,确保表创建操作在一个事务中执行，失败时会自动回滚。
         await conn.run_sync(Base.metadata.create_all)
     logger.info("数据库表结构检查/创建完成")
 

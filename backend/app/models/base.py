@@ -20,6 +20,7 @@ class Base(DeclarativeBase):
     """
     SQLAlchemy 2.0 声明式基类
     所有 ORM 模型必须继承的基类，metadata 会自动收集所有子类
+    它会自动创建一个 metadata 对象，用来收集所有继承它的模型表结构。
     """
     pass
 
