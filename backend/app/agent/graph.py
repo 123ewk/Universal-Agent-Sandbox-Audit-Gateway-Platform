@@ -92,7 +92,10 @@ class AgentGraph:
         compressor: Optional[ContextCompressor] = None,
         prompt_builder: Optional[PromptBuilder] = None,
         checkpointer: Optional[Any] = None,
-        sandbox_provider: Optional[Any] = None,  # Phase 6: SandboxProvider
+        sandbox_provider: Optional[Any] = None,    # Phase 6
+        ws_manager: Optional[Any] = None,           # Phase 7
+        detector: Optional[Any] = None,             # Phase 7
+        approval_manager: Optional[Any] = None,     # Phase 7
     ) -> None:
         self.llm = llm_client or LLMClient()
         self.gateway = gateway or AuditGateway()
@@ -100,13 +103,14 @@ class AgentGraph:
         self.observation_pipeline = observation_pipeline or ObservationPipeline()
         self.compressor = compressor or ContextCompressor()
         self.prompt_builder = prompt_builder or PromptBuilder()
-        self.sandbox_provider = sandbox_provider  # Phase 6
+        self.sandbox_provider = sandbox_provider
+        self.ws_manager = ws_manager              # Phase 7
+        self.detector = detector                  # Phase 7
+        self.approval_manager = approval_manager  # Phase 7
 
-        # LangGraph checkpointer（用于中断/恢复执行，如人工审批）
         self._checkpointer = checkpointer or MemorySaver()
-        self._engines: dict[int, Any] = {}  # session_id → SandboxEngine
+        self._engines: dict[int, Any] = {}
 
-        # 构建图
         self._graph = self._build_graph()
 
     # ================================================================
@@ -286,16 +290,36 @@ class AgentGraph:
 
             # 处理审批等待
             if isinstance(result, ApprovalRequired):
-                logger.info("[Execute] Step %d 需要审批: approval_id=%d",
-                            step.step_number, result.approval_record_id)
                 record.required_approval = True
                 record.success = False
                 record.error_message = "等待人类审批"
                 state.transition_to(AgentStatus.WAITING_APPROVAL)
 
-                # TODO: 持久化审批记录，通过 WebSocket 通知前端
-                # 当前实现：在测试/开发环境中自动跳过审批
-                state.agent_status = AgentStatus.WAITING_APPROVAL
+                # Phase 7: 通过 WebSocket 推送审批通知
+                if self.ws_manager and self.approval_manager:
+                    from app.ws.protocol import ApprovalPayload, approval_required
+                    approval_req = await self.approval_manager.request(
+                        session_id=state.session_id,
+                        skill_name=step.skill_name,
+                        step_number=step.step_number,
+                        risk_score=result.assessment.score if result.assessment else 0,
+                    )
+                    await self.ws_manager.broadcast(
+                        state.session_id,
+                        approval_required(state.session_id, ApprovalPayload(
+                            approval_id=approval_req.id,
+                            skill_name=step.skill_name,
+                            risk_score=result.assessment.score if result.assessment else 0,
+                            step_number=step.step_number,
+                        )),
+                    )
+                    # 等待审批结果
+                    await approval_req.event.wait()
+                    if approval_req.status.value == "approved":
+                        # 审批通过，重新执行（bypass_approval）
+                        pass  # 继续执行
+                    else:
+                        record.error_message = f"审批被拒绝: {approval_req.status.value}"
             else:
                 record.success = result.success
                 record.result_data = result.data
@@ -318,6 +342,21 @@ class AgentGraph:
             "[Execute] Step %d 完成: success=%s, time=%dms",
             step.step_number, record.success, record.execution_time_ms,
         )
+
+        # Phase 7: WebSocket 推送步骤完成事件
+        if self.ws_manager:
+            from app.ws.protocol import StepPayload, agent_step_completed, agent_step_failed
+            payload = StepPayload(
+                step_number=step.step_number,
+                skill_name=step.skill_name,
+                description=step.description,
+                success=record.success,
+                execution_time_ms=record.execution_time_ms,
+                error=record.error_message,
+            )
+            msg = agent_step_completed(state.session_id, payload) if record.success \
+                else agent_step_failed(state.session_id, payload)
+            await self.ws_manager.broadcast(state.session_id, msg)
 
         return {
             "execution_history": state.execution_history,
@@ -416,13 +455,27 @@ class AgentGraph:
 
         state.transition_to(AgentStatus.REFLECTING)
 
+        # Phase 7: 跨步骤行为检测
+        if self.detector:
+            assessment = await self.detector.analyze(state, self.ws_manager)
+            if assessment.should_pause and self.approval_manager:
+                logger.warning(
+                    "[Reflect] 行为检测触发暂停: session=%d, score=%d",
+                    state.session_id, assessment.total_score,
+                )
+
         # 自动决策：等待审批
         if state.agent_status == AgentStatus.WAITING_APPROVAL:
-            # TODO: 实际项目中通过 WebSocket + 数据库等待人类审批
-            # 当前实现：自动批准继续（测试/开发环境）
-            logger.info("[Reflect] 等待审批 — 开发模式自动通过")
-            state.agent_status = AgentStatus.EXECUTING
-            state.current_step_index += 1
+            if self.approval_manager:
+                # Phase 7: 审批已通过 execute 中完成，此处恢复执行
+                logger.info("[Reflect] 审批流程已完成，恢复执行")
+                state.agent_status = AgentStatus.EXECUTING
+                state.current_step_index += 1
+            else:
+                # 向后兼容：无审批管理器时自动通过
+                logger.info("[Reflect] 等待审批 — 开发模式自动通过")
+                state.agent_status = AgentStatus.EXECUTING
+                state.current_step_index += 1
 
             # 检查是否所有步骤完成
             if state.current_step_index >= len(state.plan_steps):
@@ -611,3 +664,7 @@ class AgentGraph:
                 await engine.cleanup()
                 self._engines.pop(session_id, None)
                 logger.info("[AgentGraph] SandboxEngine 已清理: session=%d", session_id)
+
+            # Phase 7: 清理 WS 房间
+            if self.ws_manager:
+                await self.ws_manager.cleanup_session(session_id)

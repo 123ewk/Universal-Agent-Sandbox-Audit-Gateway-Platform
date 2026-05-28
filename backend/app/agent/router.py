@@ -246,117 +246,52 @@ async def websocket_session(
     session_id: int,
 ):
     """
-    实时订阅 Agent Session 的执行事件流
+    实时订阅 Agent Session 的执行事件流（Phase 7 升级版）
 
-    事件类型：
-      step_started:  步骤开始执行
-      step_completed: 步骤执行完成
-      approval_required: 需要人类审批
-      observation:    新的观察记录
-      status_change:  Agent 状态变更
-      error:          错误信息
-      completed:      任务完成
+    基于 ConnectionManager 的事件推送架构，
+    Agent 通过 ws_manager.broadcast() 推送事件，
+    前端通过此端点订阅。
 
-    消息格式（JSON）：
-      {"event": "step_completed", "data": {...}, "timestamp": "..."}
+    事件命名空间：agent.* / sandbox.* / audit.* / approval.* / system.*
     """
-    await websocket.accept()
-    logger.info("[WebSocket] 客户端已连接: session_id=%d", session_id)
+    from app.ws.manager import ConnectionManager
+    from app.ws.protocol import EventType
+
+    # 获取全局 ConnectionManager
+    manager = _get_ws_manager()
+
+    await manager.connect(websocket, session_id)
 
     try:
-        # 发送连接确认
-        await websocket.send_json({
-            "event": "connected",
-            "data": {"session_id": session_id},
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        })
-
-        # 循环检查任务状态并推送
-        last_step_count = 0
+        # 保持连接存活，事件由 AgentGraph 通过 manager.broadcast() 推送
         while True:
-            state = _active_tasks.get(session_id)
-            if state is None:
-                # 任务不存在或已结束，检查数据库
-                await websocket.send_json({
-                    "event": "heartbeat",
-                    "data": {"message": "等待任务开始..."},
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                })
-                await asyncio.sleep(2)
-                continue
-
-            # 检测状态变更
-            current_step_count = state.total_steps_executed
-            if current_step_count > last_step_count:
-                last_step = state.last_step
-                if last_step:
-                    await websocket.send_json({
-                        "event": "step_completed",
-                        "data": {
-                            "step_number": last_step.step_number,
-                            "success": last_step.success,
-                            "skill_name": last_step.plan_step.skill_name,
-                            "execution_time_ms": last_step.execution_time_ms,
-                            "error": last_step.error_message,
-                        },
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
-                    })
-
-                if state.last_observation:
-                    await websocket.send_json({
-                        "event": "observation",
-                        "data": {
-                            "summary": state.last_observation.summary,
-                            "page_title": state.last_observation.page_title,
-                            "errors": state.last_observation.errors,
-                        },
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
-                    })
-
-                last_step_count = current_step_count
-
-            # 检测审批请求
-            if state.agent_status == AgentStatus.WAITING_APPROVAL:
-                await websocket.send_json({
-                    "event": "approval_required",
-                    "data": {
-                        "step_number": state.current_step_index + 1,
-                        "session_id": session_id,
-                        "message": "Agent 触发了高危操作，需要人类审批",
-                    },
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                })
-
-            # 任务完成/失败
-            if state.is_finished:
-                await websocket.send_json({
-                    "event": "completed" if state.agent_status == AgentStatus.COMPLETED else "error",
-                    "data": {
-                        "status": state.agent_status.value,
-                        "total_steps": state.total_steps_executed,
-                        "total_cost": str(state.total_llm_cost),
-                        "error": state.error_message,
-                    },
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                })
-                break
-
-            # 发送心跳
-            await websocket.send_json({
-                "event": "heartbeat",
-                "data": {"progress_pct": state.progress_pct},
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            })
-
-            await asyncio.sleep(1)  # 每秒推送一次状态
-
+            await asyncio.sleep(30)  # 心跳已在 manager 层处理
     except WebSocketDisconnect:
         logger.info("[WebSocket] 客户端断开: session_id=%d", session_id)
     except Exception as exc:
         logger.error("[WebSocket] 异常: session_id=%d, error=%s", session_id, exc)
     finally:
-        if session_id in _active_tasks:
-            del _active_tasks[session_id]
+        await manager.disconnect(websocket, session_id)
+
+
+# ====================================================================
+# 全局 WS Manager（惰性初始化）
+# ====================================================================
+
+_ws_manager: Optional[Any] = None
+
+
+def _get_ws_manager():
+    global _ws_manager
+    if _ws_manager is None:
+        from app.ws.manager import ConnectionManager
+        _ws_manager = ConnectionManager()
+    return _ws_manager
+
+
+def set_ws_manager(mgr: Any) -> None:
+    global _ws_manager
+    _ws_manager = mgr
 
 
 # ====================================================================
