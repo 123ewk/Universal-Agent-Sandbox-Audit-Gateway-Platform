@@ -10,6 +10,7 @@ create_app() — FastAPI 应用工厂
 不放业务逻辑。
 """
 import logging
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -107,8 +108,9 @@ def create_app() -> FastAPI:
     # 4. Lifecycle
     # ================================================================
 
-    @app.on_event("startup")
-    async def startup():
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        # Startup
         logger.info("ShadowOS 启动中...")
         try:
             from app.database import init_db
@@ -117,9 +119,8 @@ def create_app() -> FastAPI:
             logger.warning("DB 初始化跳过: %s", exc)
         _wire_event_bus()
         logger.info("ShadowOS 启动完成")
-
-    @app.on_event("shutdown")
-    async def shutdown():
+        yield
+        # Shutdown
         logger.info("ShadowOS 关闭中...")
         try:
             from app.database import close_db
@@ -127,5 +128,7 @@ def create_app() -> FastAPI:
         except Exception as exc:
             logger.warning("DB 关闭异常: %s", exc)
         logger.info("ShadowOS 已关闭")
+
+    app.router.lifespan_context = lifespan
 
     return app

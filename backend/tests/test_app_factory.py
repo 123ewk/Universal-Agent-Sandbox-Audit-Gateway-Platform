@@ -56,7 +56,8 @@ class TestAppFactory:
         resp = self.client.get("/openapi.json")
         assert resp.status_code == 200
         schema = resp.json()
-        tags = {t["name"] for t in schema.get("tags", [])}
-        assert "Agent" in tags
-        assert "Approval" in tags
-        assert "Screenshots" in tags
+        # 验证关键路由已注册
+        paths = set(schema.get("paths", {}).keys())
+        assert "/api/v1/tasks" in paths
+        assert "/api/v1/approvals/pending" in paths
+        assert "/api/screenshots/" in paths
