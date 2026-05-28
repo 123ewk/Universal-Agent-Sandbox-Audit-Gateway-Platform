@@ -26,6 +26,7 @@ SkillSelector — 渐进式技能选择器
   两层互不依赖，保障安全。
 """
 import logging
+import os
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -34,6 +35,9 @@ from app.skills.enums import SkillTier
 from app.skills.registry import registry
 
 logger = logging.getLogger(__name__)
+
+# skill.md 文档目录（与此文件同级的 descriptions/ 目录）
+_SKILL_DOC_DIR = os.path.join(os.path.dirname(__file__), "descriptions")
 
 
 # ====================================================================
@@ -254,9 +258,58 @@ class SkillSelector:
         """获取 Tier 的人类可读描述"""
         return TIER_DESCRIPTIONS.get(tier, tier.value)
 
+    # ---- Skill 文档加载 ----
+
+    def get_skill_doc(self, name: str) -> str | None:
+        """
+        获取 Skill 的详细文档（skill.md）
+
+        当 Agent 决定使用某个 Skill 时调用此方法，
+        将完整的 skill.md 内容注入 LLM 上下文供其参考。
+
+        文档按需加载（lazy loading），只在 Agent 选中 skill 后读取，
+        避免一次性加载所有 skill.md 浪费 token。
+
+        Args:
+            name: Skill 名称（如 "browser_click"）
+
+        Returns:
+            skill.md 的完整文本内容，文件不存在时返回 None
+        """
+        skill = self.get_skill(name)
+        if skill is None:
+            return None
+        return load_skill_doc(name)
+
 
 # ---- 快捷函数 ----
 
 def create_default_selector() -> SkillSelector:
     """创建一个使用默认配置的 SkillSelector（仅 CORE 可见）"""
     return SkillSelector()
+
+
+def load_skill_doc(name: str) -> str | None:
+    """
+    加载指定 Skill 的 markdown 文档（skill.md）
+
+    从 descriptions/ 目录读取 {name}.md 文件。
+    与 SkillSelector.get_skill_doc() 的区别：
+      此函数不做 Tier 可见性检查，直接读文件。
+
+    Args:
+        name: Skill 名称（如 "browser_goto"）
+
+    Returns:
+        skill.md 文本内容，文件不存在时返回 None
+    """
+    doc_path = os.path.join(_SKILL_DOC_DIR, f"{name}.md")
+    if not os.path.isfile(doc_path):
+        logger.warning("Skill 文档不存在: %s (%s)", name, doc_path)
+        return None
+    try:
+        with open(doc_path, "r", encoding="utf-8") as f:
+            return f.read()
+    except Exception as exc:
+        logger.error("读取 Skill 文档失败: %s, error=%s", name, exc)
+        return None
