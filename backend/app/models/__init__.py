@@ -8,6 +8,7 @@ from app.models.base import Base, BaseModelMixin
 from app.models.session import AgentSession
 from app.models.audit_log import AuditLog
 from app.models.approval import ApprovalRecord
+from app.models.memory import MemoryVector
 
 __all__ = [
     "Base",
@@ -15,4 +16,5 @@ __all__ = [
     "AgentSession",
     "AuditLog",
     "ApprovalRecord",
+    "MemoryVector",
 ]

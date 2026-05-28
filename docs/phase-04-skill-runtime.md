@@ -99,6 +99,51 @@ SkillSelector.detect_required_tiers("读取 /tmp/data.txt，执行备份命令")
 
 **与 AuditGateway 的关系**：SkillSelector 负责"选"，AuditGateway 负责"执行"。Selector 决定 LLM 能看到什么，Gateway 决定能不能执行。两层互不依赖，保障安全。
 
+### 1a. 按需 Skill 文档（skill.md）
+
+**设计动机**：`get_llm_tools()` 返回的 OpenAI Function Calling 格式（名称+描述+schema）只够 LLM 知道"有哪些工具可用"。当 LLM 决定使用某个 Skill 后，需要更详细的用法说明——参数约束、安全规则、错误处理、示例。
+
+**实现方式**：`get_skill_doc(name: str) → str | None`
+
+```
+get_llm_tools() → LLM 看到全部可用 Skill 的轻量 schema（始终加载）
+     │
+     ▼ LLM 选中 browser_click
+     │
+get_skill_doc("browser_click") → 加载 skill.md 完整内容（按需）
+     │
+     ▼ LLM 获得完整使用说明
+```
+
+**存储位置**：`backend/app/skills/descriptions/{skill_name}.md`
+
+**8 个 skill.md 统一结构**：
+
+```
+Description      — 做什么 + 与其它 skill 的关系
+When to use      — 什么场景调用
+When NOT to use  — 什么场景不要用，改用哪个
+Parameters       — 表格（含 default + 详细 description）
+Returns          — JSON 结构说明
+Risk Level       — L1-L5
+Human Approval   — 是否需要审批
+Security Rules   — 具体拦截规则表
+Examples         — 2-3 个实际场景
+Limits           — timeout + max_retry
+Errors           — 表格（error / meaning / resolution）
+```
+
+**设计要点**：
+- 每个 skill.md 约 1500-3000 字符，信息密度高于 schema 但远低于原始 HTML
+- 按需加载 = 只有被选中的 Skill 才消耗 Token
+- `load_skill_doc(name)` 直接读文件（无 Tier 检查）
+- `selector.get_skill_doc(name)` 先检查 Tier 是否解锁
+
+**参考开源**：
+- **browser-use** 的 `Field(description=...)` 参数描述 + 系统提示词规则密集度
+- **smolagents** 的 `Tool.description` + `inputs` 文档风格
+- 两层信息模型（schema 轻量前置 + skill.md 按需加载）是我们的独特设计
+
 ### 2. 风险等级体系 (L1-L5)
 
 对应 ShadowOS 五级风险模型：
@@ -216,6 +261,10 @@ BLOCKED_COMMAND_KEYWORDS = [
 | decode_responses | Redis 连接池级别 | 避免每个查询手动 decode bytes |
 
 ## 测试覆盖（70 单元测试 + 9 集成测试）
+
+**提交历史**：
+- `c973dcb` ~ `6342ba1` — 核心 Skill Runtime + Risk Engine + Audit Gateway + 渐进式披露
+- `edf659f` — 升级 8 个 skill.md 到开源级别颗粒度（含 when to use/not use、多示例、错误表）
 
 **测试套件 1 — BaseSkill（3 个）**：
 - 子类不定义 name → TypeError

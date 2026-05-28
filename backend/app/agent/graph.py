@@ -1,0 +1,577 @@
+"""
+AgentGraph — LangGraph Plan-Execute-Observe-Reflect 循环
+
+设计动机：
+  ReAct 模式（Reason+Act）容易陷入无限循环，因为 LLM 每次只决定"下一步做什么"。
+  Plan-Execute-Reflect 模式先规划再执行，每步执行后评估结果，能更好地追踪进度。
+
+状态机：
+                    ┌─────────┐
+                    │  START  │
+                    └────┬────┘
+                         │
+                    ┌────▼────┐
+                    │  PLAN   │  LLM 拆解任务为步骤列表
+                    └────┬────┘
+                         │
+                    ┌────▼────┐
+                    │ EXECUTE │  调用 AuditGateway 执行当前步骤的 Skill
+                    └────┬────┘
+                         │
+                    ┌────▼────┐
+                    │ OBSERVE │  ObservationPipeline 处理执行结果
+                    └────┬────┘
+                         │
+                    ┌────▼────┐
+                    │ REFLECT │  LLM 评估结果，决定下一步
+                    └────┬────┘
+                         │
+              ┌──────────┼──────────┐
+              │          │          │
+         continue/   complete/   abort/
+          retry      (END)     (END)
+              │
+              └──→ EXECUTE
+
+安全设计：
+  — 每步执行前进行风险评估
+  — 需要审批的步骤暂停等待
+  — 最大步数硬限制（防止无限循环）
+  — 连续失败 3 次强制 replan
+
+使用方式：
+  graph = AgentGraph(llm_client=llm, gateway=gateway)
+  result = await graph.invoke(task_description="搜索今天的天气", session_id=1)
+"""
+import asyncio
+import json
+import logging
+from datetime import datetime, timezone
+from decimal import Decimal
+from typing import Any, Literal, Optional
+
+from langgraph.graph import END, StateGraph
+from langgraph.checkpoint.memory import MemorySaver
+
+from app.agent.compression import ContextCompressor
+from app.agent.context import ContextManager
+from app.agent.llm import LLMClient, LLMResponse
+from app.agent.observation import ObservationPipeline
+from app.agent.prompts import PromptBuilder
+from app.agent.state import (
+    AgentState,
+    AgentStatus,
+    ObservationRecord,
+    PlanStep,
+    StepRecord,
+)
+from app.engine.gateway import ApprovalRequired, AuditGateway
+from app.skills.base import SkillContext
+from app.skills.selector import SkillSelector
+
+logger = logging.getLogger(__name__)
+
+# 最大连续失败次数（超过后强制 replan）
+_MAX_CONSECUTIVE_FAILURES = 3
+
+
+class AgentGraph:
+    """
+    LangGraph Agent 编排图
+
+    封装 Plan-Execute-Observe-Reflect 循环，
+    通过 LangGraph StateGraph 管理状态流转。
+    """
+
+    def __init__(
+        self,
+        llm_client: Optional[LLMClient] = None,
+        gateway: Optional[AuditGateway] = None,
+        context_manager: Optional[ContextManager] = None,
+        observation_pipeline: Optional[ObservationPipeline] = None,
+        compressor: Optional[ContextCompressor] = None,
+        prompt_builder: Optional[PromptBuilder] = None,
+        checkpointer: Optional[Any] = None,
+    ) -> None:
+        self.llm = llm_client or LLMClient()
+        self.gateway = gateway or AuditGateway()
+        self.context_manager = context_manager or ContextManager()
+        self.observation_pipeline = observation_pipeline or ObservationPipeline()
+        self.compressor = compressor or ContextCompressor()
+        self.prompt_builder = prompt_builder or PromptBuilder()
+
+        # LangGraph checkpointer（用于中断/恢复执行，如人工审批）
+        self._checkpointer = checkpointer or MemorySaver()
+
+        # 构建图
+        self._graph = self._build_graph()
+
+    # ================================================================
+    # 图构建
+    # ================================================================
+
+    def _build_graph(self) -> StateGraph:
+        """构建 LangGraph StateGraph"""
+        workflow = StateGraph(AgentState)
+
+        # 注册节点
+        workflow.add_node("plan", self._plan_node)
+        workflow.add_node("execute", self._execute_node)
+        workflow.add_node("observe", self._observe_node)
+        workflow.add_node("reflect", self._reflect_node)
+
+        # 边
+        workflow.set_entry_point("plan")
+        workflow.add_edge("plan", "execute")
+        workflow.add_edge("execute", "observe")
+        workflow.add_edge("observe", "reflect")
+
+        # 条件边：Reflect → Execute / END
+        workflow.add_conditional_edges(
+            "reflect",
+            self._route_after_reflect,
+            {
+                "execute": "execute",
+                "replan": "plan",
+                "end": END,
+            },
+        )
+
+        return workflow.compile(checkpointer=self._checkpointer)
+
+    # ================================================================
+    # 节点实现
+    # ================================================================
+
+    async def _plan_node(self, state: AgentState) -> dict[str, Any]:
+        """
+        Plan 节点：LLM 拆解任务为执行步骤
+
+        流程：
+          1. 标记状态为 PLANNING
+          2. 构建 Plan Prompt
+          3. 调用 LLM 生成步骤列表
+          4. 解析 JSON → PlanStep 列表
+          5. 初始化 SkillSelector 并解锁必要 Tier
+        """
+        logger.info("[Plan] 开始规划任务: %s", state.task_description[:80])
+        state.transition_to(AgentStatus.PLANNING)
+
+        # 如果已经失败太多次，直接返回失败
+        if state.total_steps_executed >= state.max_steps:
+            state.error_message = f"超过最大执行步数 ({state.max_steps})"
+            state.transition_to(AgentStatus.FAILED)
+            return {"agent_status": state.agent_status, "error_message": state.error_message}
+
+        try:
+            # 获取可用工具列表（初始为 CORE）
+            selector = SkillSelector()
+            tools = selector.get_llm_tools()
+
+            # 构建 Plan Prompt
+            plan_prompt = self.prompt_builder.build_plan_prompt(
+                task_description=state.task_description,
+                state=state,
+                selector=selector,
+            )
+
+            messages = [
+                {"role": "system", "content": self.prompt_builder.build_system()},
+                {"role": "user", "content": plan_prompt},
+            ]
+
+            response = await self.llm.chat(messages, tools=tools, tool_choice="none")
+            plan_json = self.llm._extract_json_array(response.content)
+
+            # 解析为 PlanStep
+            plan_steps: list[PlanStep] = []
+            for item in plan_json:
+                try:
+                    step = PlanStep(
+                        step_number=item.get("step_number", len(plan_steps) + 1),
+                        description=item.get("description", ""),
+                        skill_name=item.get("skill_name", ""),
+                        skill_params=item.get("skill_params", {}),
+                        expected_outcome=item.get("expected_outcome", ""),
+                        required_tier=item.get("required_tier", "CORE"),
+                    )
+                    plan_steps.append(step)
+                except Exception as exc:
+                    logger.warning("跳过无效步骤: %s, error=%s", item, exc)
+
+            state.plan_steps = plan_steps
+            state.total_steps_planned = len(plan_steps)
+            state.current_step_index = 0
+            state.add_cost(response.cost, response.tokens_used)
+
+            logger.info(
+                "[Plan] 规划完成: %d 步骤, cost=$%s",
+                len(plan_steps), response.cost,
+            )
+
+        except Exception as exc:
+            logger.error("[Plan] 规划失败: %s", exc)
+            state.error_message = f"规划失败: {exc}"
+            state.transition_to(AgentStatus.FAILED)
+
+        return {
+            "plan_steps": state.plan_steps,
+            "total_steps_planned": state.total_steps_planned,
+            "agent_status": state.agent_status,
+            "total_llm_cost": str(state.total_llm_cost),
+            "total_tokens_used": state.total_tokens_used,
+            "needs_replan": False,  # 重置 replan 标记
+        }
+
+    async def _execute_node(self, state: AgentState) -> dict[str, Any]:
+        """
+        Execute 节点：调用 AuditGateway 执行当前步骤的 Skill
+
+        流程：
+          1. 获取当前步骤
+          2. 检测需要解锁的 Tier → 解锁
+          3. 加载 skill.md 文档
+          4. 通过 AuditGateway.invoke() 执行
+          5. 处理审批等待（ApprovalRequired）
+          6. 记录 StepRecord
+        """
+        step = state.current_plan_step
+        if step is None:
+            state.error_message = "没有可执行的步骤"
+            state.transition_to(AgentStatus.FAILED)
+            return {"agent_status": state.agent_status, "error_message": state.error_message}
+
+        logger.info("[Execute] Step %d/%d: %s",
+                    state.current_step_index + 1, len(state.plan_steps),
+                    step.description)
+
+        state.transition_to(AgentStatus.EXECUTING)
+
+        # 解锁所需 Tier
+        selector = SkillSelector()
+        if step.required_tier:
+            from app.skills.enums import SkillTier
+            try:
+                tier = SkillTier(step.required_tier)
+                selector.unlock(tier)
+            except ValueError:
+                logger.warning("无效的 Tier: %s", step.required_tier)
+
+        # 创建执行上下文
+        context = SkillContext(
+            session_id=state.session_id,
+            request_id=f"step_{state.current_step_index + 1}",
+        )
+
+        started_at = datetime.now(timezone.utc)
+        record = StepRecord(
+            step_number=step.step_number,
+            plan_step=step,
+            started_at=started_at,
+        )
+
+        try:
+            # 通过 AuditGateway 安全执行
+            result = await self.gateway.invoke(
+                skill_name=step.skill_name,
+                params=step.skill_params,
+                context=context,
+                db=None,  # TODO: 集成数据库 session
+            )
+
+            # 处理审批等待
+            if isinstance(result, ApprovalRequired):
+                logger.info("[Execute] Step %d 需要审批: approval_id=%d",
+                            step.step_number, result.approval_record_id)
+                record.required_approval = True
+                record.success = False
+                record.error_message = "等待人类审批"
+                state.transition_to(AgentStatus.WAITING_APPROVAL)
+
+                # TODO: 持久化审批记录，通过 WebSocket 通知前端
+                # 当前实现：在测试/开发环境中自动跳过审批
+                state.agent_status = AgentStatus.WAITING_APPROVAL
+            else:
+                record.success = result.success
+                record.result_data = result.data
+                record.error_message = result.error
+                record.execution_time_ms = result.execution_time_ms
+
+        except Exception as exc:
+            logger.error("[Execute] Step %d 执行异常: %s", step.step_number, exc)
+            record.success = False
+            record.error_message = f"{type(exc).__name__}: {exc}"
+
+        record.finished_at = datetime.now(timezone.utc)
+        if record.started_at:
+            delta = record.finished_at - record.started_at
+            record.execution_time_ms = int(delta.total_seconds() * 1000)
+
+        state.record_step(record)
+
+        logger.info(
+            "[Execute] Step %d 完成: success=%s, time=%dms",
+            step.step_number, record.success, record.execution_time_ms,
+        )
+
+        return {
+            "execution_history": state.execution_history,
+            "total_steps_executed": state.total_steps_executed,
+            "agent_status": state.agent_status,
+            "total_llm_cost": str(state.total_llm_cost),
+        }
+
+    async def _observe_node(self, state: AgentState) -> dict[str, Any]:
+        """
+        Observe 节点：处理执行结果，生成结构化观察
+
+        流程：
+          1. 获取上一步的执行结果
+          2. 通过 ObservationPipeline 处理（如结果中含 HTML）
+          3. 生成 ObservationRecord
+          4. 增量更新 observation_summary（借助 ContextCompressor）
+          5. 裁剪 Working Context（如超限）
+        """
+        logger.info("[Observe] 处理观察数据")
+
+        state.transition_to(AgentStatus.OBSERVING)
+
+        last_step = state.last_step
+        if last_step is None:
+            return {"agent_status": state.agent_status}
+
+        # 如果执行结果是浏览器操作结果，可能包含 HTML
+        raw_html = ""
+        if last_step.result_data:
+            if isinstance(last_step.result_data, dict):
+                raw_html = last_step.result_data.get("html", "")
+                page_url = last_step.result_data.get("url", "")
+                page_title = last_step.result_data.get("title", "")
+            else:
+                page_url = ""
+                page_title = ""
+        else:
+            page_url = ""
+            page_title = ""
+
+        if raw_html:
+            # 走完整观察流水线
+            observation = await self.observation_pipeline.process(
+                raw_html=raw_html,
+                page_url=page_url,
+                page_title=page_title,
+            )
+        else:
+            # Mock/Skill 结果不是 HTML，生成简单观察
+            observation = ObservationRecord(
+                summary=str(last_step.result_data)[:200] if last_step.result_data else "执行完成",
+                page_title=page_title,
+                page_url=page_url,
+            )
+
+        state.last_observation = observation
+
+        # 增量更新摘要
+        self.compressor.update_summary(
+            state=state,
+            step=last_step,
+            observation_summary=observation.summary,
+        )
+
+        # 裁剪 Working Context
+        self.compressor.compress(state)
+
+        return {
+            "last_observation": state.last_observation,
+            "observation_summary": state.observation_summary,
+            "agent_status": state.agent_status,
+            "execution_history": state.execution_history,
+        }
+
+    async def _reflect_node(self, state: AgentState) -> dict[str, Any]:
+        """
+        Reflect 节点：LLM 评估执行结果，决定下一步
+
+        决策：
+          continue: 执行下一步
+          retry:    重试当前步骤（修改参数）
+          replan:   重新规划
+          complete: 任务完成
+          abort:    无法继续
+
+        自动决策（不调 LLM）：
+          - 等待审批 → 暂停
+          - 已完成所有步骤 → complete
+          - 连续失败 N 次 → replan 或 abort
+        """
+        logger.info("[Reflect] 评估执行结果")
+
+        state.transition_to(AgentStatus.REFLECTING)
+
+        # 自动决策：等待审批
+        if state.agent_status == AgentStatus.WAITING_APPROVAL:
+            # TODO: 实际项目中通过 WebSocket + 数据库等待人类审批
+            # 当前实现：自动批准继续（测试/开发环境）
+            logger.info("[Reflect] 等待审批 — 开发模式自动通过")
+            state.agent_status = AgentStatus.EXECUTING
+            state.current_step_index += 1
+
+            # 检查是否所有步骤完成
+            if state.current_step_index >= len(state.plan_steps):
+                state.transition_to(AgentStatus.COMPLETED)
+                return {"agent_status": state.agent_status, "needs_replan": False}
+
+            return {"agent_status": state.agent_status, "needs_replan": False}
+
+        # 自动决策：最后一步且成功
+        last_step = state.last_step
+        if last_step and last_step.success:
+            if state.current_step_index >= len(state.plan_steps) - 1:
+                state.transition_to(AgentStatus.COMPLETED)
+                logger.info("[Reflect] 所有步骤执行完成")
+                return {"agent_status": state.agent_status, "needs_replan": False}
+
+        # 自动决策：连续失败检测
+        recent = state.execution_history[-_MAX_CONSECUTIVE_FAILURES:]
+        if len(recent) >= _MAX_CONSECUTIVE_FAILURES and all(not s.success for s in recent):
+            if state.current_step_index > 0:
+                logger.warning("[Reflect] 连续 %d 次失败，强制 replan", _MAX_CONSECUTIVE_FAILURES)
+                return {"agent_status": state.agent_status, "needs_replan": True}
+            else:
+                logger.error("[Reflect] 第一步就连续失败，放弃")
+                state.transition_to(AgentStatus.FAILED)
+                state.error_message = f"连续 {_MAX_CONSECUTIVE_FAILURES} 次失败"
+                return {"agent_status": state.agent_status, "needs_replan": False}
+
+        # 调用 LLM 评估
+        try:
+            reflect_prompt = self.prompt_builder.build_reflect_prompt(state)
+            decision = await self.llm.reflect(reflect_prompt)
+
+            decision_type = decision.get("decision", "continue")
+            reason = decision.get("reason", "")
+            logger.info("[Reflect] LLM 决策: %s — %s", decision_type, reason)
+
+        except Exception as exc:
+            logger.error("[Reflect] LLM 评估失败: %s, 默认 continue", exc)
+            decision_type = "continue"
+
+        # 根据决策执行
+        if decision_type == "continue":
+            state.current_step_index += 1
+            if state.current_step_index >= len(state.plan_steps):
+                state.transition_to(AgentStatus.COMPLETED)
+                return {"agent_status": state.agent_status, "needs_replan": False}
+            return {"current_step_index": state.current_step_index, "needs_replan": False}
+
+        elif decision_type == "retry":
+            # 重试当前步骤（不推进 current_step_index）
+            modified_params = decision.get("modified_params", {})
+            if modified_params and state.current_plan_step:
+                state.current_plan_step.skill_params.update(modified_params)
+            return {"needs_replan": False}
+
+        elif decision_type == "replan":
+            # 重新规划（保留进度，重新生成后续步骤）
+            remaining = state.task_description
+            if state.observation_summary:
+                remaining += f"\n(当前进度: {state.observation_summary})"
+            state.task_description = remaining
+            return {"needs_replan": True}
+
+        elif decision_type == "complete":
+            state.transition_to(AgentStatus.COMPLETED)
+            return {"agent_status": state.agent_status, "needs_replan": False}
+
+        else:  # abort
+            state.transition_to(AgentStatus.FAILED)
+            state.error_message = decision.get("reason", "LLM 决定中止执行")
+            return {"agent_status": state.agent_status, "error_message": state.error_message, "needs_replan": False}
+
+    # ================================================================
+    # 条件路由
+    # ================================================================
+
+    @staticmethod
+    def _route_after_reflect(
+        state: AgentState,
+    ) -> Literal["execute", "replan", "end"]:
+        """
+        根据 Reflect 节点的决策，决定下一个节点
+
+        路由逻辑：
+          - is_finished → end
+          - needs_replan → replan
+          - 还有未完成的步骤 → execute
+          - 否则 → end
+        """
+        if state.is_finished:
+            return "end"
+
+        if state.needs_replan:
+            return "replan"
+
+        if state.current_step_index < len(state.plan_steps):
+            return "execute"
+        return "end"
+
+    # ================================================================
+    # 公共接口
+    # ================================================================
+
+    async def invoke(
+        self,
+        task_description: str,
+        session_id: int = 0,
+        max_steps: int = 50,
+    ) -> AgentState:
+        """
+        执行一个 Agent 任务
+
+        Args:
+            task_description: 用户自然语言任务描述
+            session_id:       数据库会话 ID
+            max_steps:        最大执行步数
+
+        Returns:
+            执行结束时的 AgentState
+        """
+        initial_state = AgentState(
+            session_id=session_id,
+            task_description=task_description,
+            max_steps=max_steps,
+        )
+
+        logger.info("[AgentGraph] 开始执行任务: session=%d, task='%s'",
+                    session_id, task_description[:80])
+
+        try:
+            # LangGraph ainvoke 自动管理状态流转
+            final_state = await self._graph.ainvoke(
+                initial_state,
+                config={"configurable": {"thread_id": str(session_id)}},
+            )
+
+            # ainvoke 返回 dict，转换为 AgentState（如果是 dict）
+            if isinstance(final_state, dict):
+                result = AgentState(**final_state)
+            else:
+                result = final_state
+
+            logger.info(
+                "[AgentGraph] 任务执行完成: session=%d, status=%s, "
+                "steps=%d, cost=$%s",
+                session_id, result.agent_status.value,
+                result.total_steps_executed, result.total_llm_cost,
+            )
+            return result
+
+        except Exception as exc:
+            logger.error("[AgentGraph] 任务执行异常: session=%d, error=%s",
+                        session_id, exc)
+            return AgentState(
+                session_id=session_id,
+                task_description=task_description,
+                agent_status=AgentStatus.FAILED,
+                error_message=str(exc),
+            )

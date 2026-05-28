@@ -67,7 +67,7 @@ class Settings(BaseSettings):
     LLM_PROVIDER: Literal["openai", "deepseek", "claude"] = "deepseek"
     LLM_API_KEY: str = ""
     LLM_API_BASE: str = "https://api.deepseek.com/v1"
-    LLM_MODEL_NAME: str = "deepseek-chat"
+    LLM_MODEL_NAME: str = "deepseek-v4-flash"
     LLM_TEMPERATURE: float = 0.0  # Agent 执行需要确定性，设为 0
     LLM_MAX_TOKENS: int = 4096
 
