@@ -29,8 +29,16 @@ class GotoSkill(BaseSkill):
         url = params.get("url", "")
         if not url:
             return SkillResult.fail("缺少必要参数: url")
-        # Phase 5 接入 Playwright 实际导航逻辑
-        return SkillResult.ok(data={"url": url, "status": "navigation_scheduled"})
+
+        engine = context.sandbox_engine
+        if engine is None:
+            return SkillResult.ok(data={"url": url, "status": "navigation_scheduled"})
+
+        result = await engine.navigate(url)
+        return SkillResult(
+            success=result.success, data=result.data,
+            error=result.error, execution_time_ms=result.execution_time_ms,
+        )
 
 
 class ScreenshotSkill(BaseSkill):
@@ -42,8 +50,15 @@ class ScreenshotSkill(BaseSkill):
     risk_level = RiskLevel.L1_READONLY
 
     async def execute(self, context: SkillContext, **params) -> SkillResult:
-        # Phase 5 接入 Playwright 实际截屏逻辑
-        return SkillResult.ok(data={"screenshot_path": None})
+        engine = context.sandbox_engine
+        if engine is None:
+            return SkillResult.ok(data={"screenshot_path": None})
+
+        result = await engine.screenshot()
+        return SkillResult(
+            success=result.success, data=result.data,
+            error=result.error, execution_time_ms=result.execution_time_ms,
+        )
 
 
 # ====================================================================
@@ -63,7 +78,16 @@ class ClickSkill(BaseSkill):
         selector = params.get("selector", "")
         if not selector:
             return SkillResult.fail("缺少必要参数: selector")
-        return SkillResult.ok(data={"selector": selector, "status": "click_scheduled"})
+
+        engine = context.sandbox_engine
+        if engine is None:
+            return SkillResult.ok(data={"selector": selector, "status": "click_scheduled"})
+
+        result = await engine.click(selector)
+        return SkillResult(
+            success=result.success, data=result.data,
+            error=result.error, execution_time_ms=result.execution_time_ms,
+        )
 
 
 class TypeSkill(BaseSkill):
@@ -79,7 +103,16 @@ class TypeSkill(BaseSkill):
         text = params.get("text", "")
         if not selector:
             return SkillResult.fail("缺少必要参数: selector")
-        return SkillResult.ok(data={"selector": selector, "text_length": len(text)})
+
+        engine = context.sandbox_engine
+        if engine is None:
+            return SkillResult.ok(data={"selector": selector, "text_length": len(text)})
+
+        result = await engine.type_text(selector, text)
+        return SkillResult(
+            success=result.success, data=result.data,
+            error=result.error, execution_time_ms=result.execution_time_ms,
+        )
 
 
 class ExtractTextSkill(BaseSkill):
@@ -98,9 +131,18 @@ class ExtractTextSkill(BaseSkill):
     risk_level = RiskLevel.L1_READONLY
 
     async def execute(self, context: SkillContext, **params) -> SkillResult:
-        selector = params.get("selector", "")  # 可选：CSS 选择器限定区域
-        return SkillResult.ok(data={
-            "selector": selector or "body",
-            "text_length": 0,
-            "content_preview": "",
-        })
+        selector = params.get("selector", "body")
+
+        engine = context.sandbox_engine
+        if engine is None:
+            return SkillResult.ok(data={
+                "selector": selector,
+                "text_length": 0,
+                "content_preview": "",
+            })
+
+        result = await engine.extract_text(selector)
+        return SkillResult(
+            success=result.success, data=result.data,
+            error=result.error, execution_time_ms=result.execution_time_ms,
+        )

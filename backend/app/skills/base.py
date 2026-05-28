@@ -38,7 +38,7 @@ class SkillContext:
     session_id: int = 0
     request_id: str = ""
     sandbox_id: str | None = None
-    # 预留：后续可能添加用户 ID、租户 ID 等信息
+    sandbox_engine: Any | None = None  # Phase 6: SandboxEngine 实例，Skills 通过它操作浏览器
     extra: dict[str, Any] = field(default_factory=dict)
 
 

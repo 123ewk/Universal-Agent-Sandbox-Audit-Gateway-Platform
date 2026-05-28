@@ -92,6 +92,7 @@ class AgentGraph:
         compressor: Optional[ContextCompressor] = None,
         prompt_builder: Optional[PromptBuilder] = None,
         checkpointer: Optional[Any] = None,
+        sandbox_provider: Optional[Any] = None,  # Phase 6: SandboxProvider
     ) -> None:
         self.llm = llm_client or LLMClient()
         self.gateway = gateway or AuditGateway()
@@ -99,9 +100,11 @@ class AgentGraph:
         self.observation_pipeline = observation_pipeline or ObservationPipeline()
         self.compressor = compressor or ContextCompressor()
         self.prompt_builder = prompt_builder or PromptBuilder()
+        self.sandbox_provider = sandbox_provider  # Phase 6
 
         # LangGraph checkpointer（用于中断/恢复执行，如人工审批）
         self._checkpointer = checkpointer or MemorySaver()
+        self._engines: dict[int, Any] = {}  # session_id → SandboxEngine
 
         # 构建图
         self._graph = self._build_graph()
@@ -257,10 +260,12 @@ class AgentGraph:
             except ValueError:
                 logger.warning("无效的 Tier: %s", step.required_tier)
 
-        # 创建执行上下文
+        # 创建执行上下文（注入 SandboxEngine）
+        engine = self._engines.get(state.session_id)
         context = SkillContext(
             session_id=state.session_id,
             request_id=f"step_{state.current_step_index + 1}",
+            sandbox_engine=engine,  # Phase 6: Skills 通过此字段操作浏览器
         )
 
         started_at = datetime.now(timezone.utc)
@@ -340,33 +345,36 @@ class AgentGraph:
         if last_step is None:
             return {"agent_status": state.agent_status}
 
-        # 如果执行结果是浏览器操作结果，可能包含 HTML
-        raw_html = ""
-        if last_step.result_data:
-            if isinstance(last_step.result_data, dict):
-                raw_html = last_step.result_data.get("html", "")
-                page_url = last_step.result_data.get("url", "")
-                page_title = last_step.result_data.get("title", "")
-            else:
-                page_url = ""
-                page_title = ""
-        else:
-            page_url = ""
-            page_title = ""
-
-        if raw_html:
-            # 走完整观察流水线
-            observation = await self.observation_pipeline.process(
-                raw_html=raw_html,
-                page_url=page_url,
-                page_title=page_title,
-            )
-        else:
-            # Mock/Skill 结果不是 HTML，生成简单观察
+        # Phase 6: 优先从 SandboxEngine 获取真实页面信息
+        engine = self._engines.get(state.session_id)
+        if engine and engine.page:
+            page_info = await engine.get_page_info()
+            # engine.get_page_info() 已返回 cleaned_text + interactive_elements
+            # 不暴露完整原始 HTML（上下文铁律）
             observation = ObservationRecord(
-                summary=str(last_step.result_data)[:200] if last_step.result_data else "执行完成",
-                page_title=page_title,
-                page_url=page_url,
+                summary=self._build_page_summary(page_info),
+                page_title=page_info.title,
+                page_url=page_info.url,
+                interactive_elements=page_info.interactive_elements[:20],
+                raw_data_ref=page_info.screenshot_path,
+            )
+        elif last_step.result_data and isinstance(last_step.result_data, dict):
+            raw_html = last_step.result_data.get("html", "")
+            if raw_html:
+                observation = await self.observation_pipeline.process(
+                    raw_html=raw_html,
+                    page_url=last_step.result_data.get("url", ""),
+                    page_title=last_step.result_data.get("title", ""),
+                )
+            else:
+                observation = ObservationRecord(
+                    summary=str(last_step.result_data)[:200],
+                    page_url=last_step.result_data.get("url", ""),
+                    page_title=last_step.result_data.get("title", ""),
+                )
+        else:
+            observation = ObservationRecord(
+                summary="执行完成",
             )
 
         state.last_observation = observation
@@ -519,6 +527,16 @@ class AgentGraph:
     # 公共接口
     # ================================================================
 
+    @staticmethod
+    def _build_page_summary(page_info: Any) -> str:
+        """从 PageInfo 构建观察摘要"""
+        parts = [f"页面 '{page_info.title}'" if page_info.title else "当前页面"]
+        if page_info.element_count > 0:
+            parts.append(f"含 {page_info.element_count} 个交互元素")
+        if page_info.screenshot_path:
+            parts.append(f"截图: {page_info.screenshot_path}")
+        return "，".join(parts)
+
     async def invoke(
         self,
         task_description: str,
@@ -544,6 +562,18 @@ class AgentGraph:
 
         logger.info("[AgentGraph] 开始执行任务: session=%d, task='%s'",
                     session_id, task_description[:80])
+
+        # Phase 6: 创建 SandboxEngine（如配置了 Provider）
+        engine = None
+        if self.sandbox_provider:
+            from app.sandbox.engine import SandboxEngine
+            engine = SandboxEngine(
+                provider=self.sandbox_provider,
+                session_id=session_id,
+            )
+            await engine.create_context()
+            self._engines[session_id] = engine
+            logger.info("[AgentGraph] SandboxEngine 已创建: session=%d", session_id)
 
         try:
             # LangGraph ainvoke 自动管理状态流转
@@ -575,3 +605,9 @@ class AgentGraph:
                 agent_status=AgentStatus.FAILED,
                 error_message=str(exc),
             )
+        finally:
+            # Phase 6: 清理 SandboxEngine
+            if engine:
+                await engine.cleanup()
+                self._engines.pop(session_id, None)
+                logger.info("[AgentGraph] SandboxEngine 已清理: session=%d", session_id)
