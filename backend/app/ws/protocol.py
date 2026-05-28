@@ -153,6 +153,7 @@ class WSMessage(BaseModel):
     """
     event: str
     session_id: int
+    seq: Optional[int] = None      # 事件序号，每个 session 独立递增，前端用于去重和顺序恢复
     timestamp: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     payload: dict[str, Any] = Field(default_factory=dict)
 
