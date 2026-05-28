@@ -12,7 +12,7 @@ File Skills — 文件系统操作技能
 """
 import logging
 from app.skills.base import BaseSkill, SkillCategory, SkillContext, SkillResult
-from app.skills.enums import RiskLevel
+from app.skills.enums import RiskLevel, SkillTier
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +45,7 @@ class ReadFileSkill(BaseSkill):
     name = "file_read"
     description = "读取指定路径的文件内容"
     category = SkillCategory.FILE
+    tier = SkillTier.FILE
     risk_level = RiskLevel.L3_FILE_OP
 
     async def execute(self, context: SkillContext, **params) -> SkillResult:
@@ -66,6 +67,7 @@ class WriteFileSkill(BaseSkill):
     name = "file_write"
     description = "将内容写入到指定文件"
     category = SkillCategory.FILE
+    tier = SkillTier.FILE
     risk_level = RiskLevel.L3_FILE_OP
 
     async def execute(self, context: SkillContext, **params) -> SkillResult:

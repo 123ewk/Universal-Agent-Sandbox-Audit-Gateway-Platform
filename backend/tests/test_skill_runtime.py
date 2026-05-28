@@ -14,13 +14,14 @@ Phase 4 — Skill 运行时 + Risk Engine 测试套件
 import pytest
 
 from app.skills.base import BaseSkill, SkillCategory, SkillContext, SkillResult
-from app.skills.enums import RiskLevel
+from app.skills.enums import RiskLevel, SkillTier
 from app.skills.registry import SkillRegistry, registry as global_registry
 from app.skills.browser import (
     GotoSkill, ClickSkill, ScreenshotSkill, TypeSkill, ExtractTextSkill,
 )
 from app.skills.file import ReadFileSkill, WriteFileSkill
 from app.skills.shell import RunCommandSkill
+from app.skills.selector import SkillSelector, TIER_KEYWORDS, TIER_DESCRIPTIONS
 from app.engine.risk import RiskEngine, RiskAssessment
 
 
@@ -175,6 +176,35 @@ class TestSkillRegistry:
         l4_skills = registry.list_by_risk(RiskLevel.L4_SHELL)
         assert len(l4_skills) == 1
         assert l4_skills[0].name == "shell_run"
+
+    def test_list_by_tier(self, registry):
+        """验证：按披露层级筛选"""
+        registry.register(GotoSkill())          # CORE
+        registry.register(ClickSkill())         # INTERACTION
+        registry.register(ReadFileSkill())      # FILE
+        registry.register(RunCommandSkill())    # SHELL
+
+        core_skills = registry.list_by_tier(SkillTier.CORE)
+        assert len(core_skills) == 1
+        assert core_skills[0].name == "browser_goto"
+
+        shell_skills = registry.list_by_tier(SkillTier.SHELL)
+        assert len(shell_skills) == 1
+        assert shell_skills[0].name == "shell_run"
+
+    def test_list_by_tiers(self, registry):
+        """验证：按多个披露层级筛选"""
+        registry.register(GotoSkill())          # CORE
+        registry.register(ClickSkill())         # INTERACTION
+        registry.register(ReadFileSkill())      # FILE
+        registry.register(RunCommandSkill())    # SHELL
+
+        browser_and_file = registry.list_by_tiers({SkillTier.CORE, SkillTier.FILE})
+        names = {s.name for s in browser_and_file}
+        assert "browser_goto" in names          # CORE
+        assert "file_read" in names             # FILE
+        assert "browser_click" not in names     # INTERACTION 不在集合中
+        assert "shell_run" not in names         # SHELL 不在集合中
 
     def test_count(self, registry):
         """验证：count() 返回正确数量"""
@@ -457,3 +487,192 @@ class TestRiskEngine:
         assert "reasons" in d
         assert "requires_approval" in d
         assert "suggested_action" in d
+
+
+# ====================================================================
+# Test Suite 6: SkillSelector
+# ====================================================================
+
+
+class TestSkillSelector:
+    """验证 SkillSelector 渐进式技能选择器"""
+
+    @pytest.fixture
+    def selector(self):
+        return SkillSelector()
+
+    @pytest.fixture
+    def populated_registry(self):
+        """注册所有 8 个 Skill 到全局 registry"""
+        import app.skills.browser  # noqa: F401
+        import app.skills.file     # noqa: F401
+        import app.skills.shell    # noqa: F401
+
+        reg = SkillRegistry()
+        for skill_cls in [GotoSkill, ClickSkill, ScreenshotSkill, TypeSkill,
+                          ExtractTextSkill, ReadFileSkill, WriteFileSkill,
+                          RunCommandSkill]:
+            reg.register(skill_cls())
+        return reg
+
+    # ---- 初始状态 ----
+
+    def test_default_only_core_unlocked(self, selector):
+        """验证：默认只解锁 CORE"""
+        assert selector.active_tiers == {SkillTier.CORE}
+
+    def test_custom_initial_tiers(self):
+        """验证：自定义初始 Tier"""
+        s = SkillSelector(initial_tiers={SkillTier.CORE, SkillTier.INTERACTION})
+        assert s.active_tiers == {SkillTier.CORE, SkillTier.INTERACTION}
+
+    # ---- unlock / lock / is_unlocked ----
+
+    def test_unlock_new_tier(self, selector):
+        """验证：解锁新 Tier 返回 True"""
+        assert selector.unlock(SkillTier.INTERACTION) is True
+        assert SkillTier.INTERACTION in selector.active_tiers
+
+    def test_unlock_already_unlocked(self, selector):
+        """验证：重复解锁返回 False"""
+        assert selector.unlock(SkillTier.CORE) is False  # CORE 默认已解锁
+
+    def test_lock_specific_tier(self, selector):
+        """验证：锁定指定 Tier"""
+        selector.unlock(SkillTier.INTERACTION)
+        assert SkillTier.INTERACTION in selector.active_tiers
+        selector.lock(SkillTier.INTERACTION)
+        assert SkillTier.INTERACTION not in selector.active_tiers
+
+    def test_lock_reset(self, selector):
+        """验证：lock() 无参数重置到仅 CORE"""
+        selector.unlock(SkillTier.FILE)
+        selector.unlock(SkillTier.SHELL)
+        assert len(selector.active_tiers) == 3
+        selector.lock()
+        assert selector.active_tiers == {SkillTier.CORE}
+
+    def test_is_unlocked(self, selector):
+        """验证：is_unlocked 正确判断"""
+        assert selector.is_unlocked(SkillTier.CORE) is True
+        assert selector.is_unlocked(SkillTier.INTERACTION) is False
+        selector.unlock(SkillTier.INTERACTION)
+        assert selector.is_unlocked(SkillTier.INTERACTION) is True
+
+    # ---- 可见技能过滤 ----
+
+    def test_get_visible_skills_default(self, selector, populated_registry):
+        """验证：默认只看到 CORE 技能"""
+        # 用 populated_registry 替换全局 registry
+        import app.skills.registry as reg_mod
+        original = reg_mod.registry._skills
+        reg_mod.registry._skills = populated_registry._skills
+        try:
+            skills = selector.get_visible_skills()
+            names = {s.name for s in skills}
+            assert "browser_goto" in names          # CORE
+            assert "browser_screenshot" in names    # CORE
+            assert "browser_extract_text" in names  # CORE
+            assert "browser_click" not in names     # INTERACTION
+            assert "shell_run" not in names         # SHELL
+            assert len(skills) == 3                 # 只有 3 个 CORE skill
+        finally:
+            reg_mod.registry._skills = original
+
+    def test_get_visible_skills_after_unlock(self, selector, populated_registry):
+        """验证：解锁 INTERACTION 后可看到 click/type"""
+        import app.skills.registry as reg_mod
+        original = reg_mod.registry._skills
+        reg_mod.registry._skills = populated_registry._skills
+        try:
+            selector.unlock(SkillTier.INTERACTION)
+            names = {s.name for s in selector.get_visible_skills()}
+            assert "browser_goto" in names
+            assert "browser_click" in names
+            assert "browser_type" in names
+            assert "shell_run" not in names          # SHELL 仍未解锁
+        finally:
+            reg_mod.registry._skills = original
+
+    def test_get_skill_visible(self, selector, populated_registry):
+        """验证：get_skill 在 Tier 解锁时可用"""
+        import app.skills.registry as reg_mod
+        original = reg_mod.registry._skills
+        reg_mod.registry._skills = populated_registry._skills
+        try:
+            skill = selector.get_skill("browser_goto")
+            assert skill is not None
+            assert skill.name == "browser_goto"
+        finally:
+            reg_mod.registry._skills = original
+
+    def test_get_skill_not_visible(self, selector, populated_registry):
+        """验证：get_skill 在 Tier 未解锁时返回 None"""
+        import app.skills.registry as reg_mod
+        original = reg_mod.registry._skills
+        reg_mod.registry._skills = populated_registry._skills
+        try:
+            skill = selector.get_skill("shell_run")  # SHELL 未解锁
+            assert skill is None
+        finally:
+            reg_mod.registry._skills = original
+
+    def test_get_skill_nonexistent(self, selector):
+        """验证：get_skill 未知名称返回 None"""
+        assert selector.get_skill("nonexistent") is None
+
+    # ---- LLM Tool 格式 ----
+
+    def test_get_llm_tools_format(self, selector, populated_registry):
+        """验证：get_llm_tools 返回 OpenAI function calling 格式"""
+        import app.skills.registry as reg_mod
+        original = reg_mod.registry._skills
+        reg_mod.registry._skills = populated_registry._skills
+        try:
+            tools = selector.get_llm_tools()
+            assert len(tools) == 3  # 默认只有 CORE
+            for tool in tools:
+                assert tool["type"] == "function"
+                assert "function" in tool
+                assert "name" in tool["function"]
+                assert "description" in tool["function"]
+                assert "parameters" in tool["function"]
+                assert tool["function"]["parameters"]["type"] == "object"
+        finally:
+            reg_mod.registry._skills = original
+
+    # ---- 自动推断 ----
+
+    def test_detect_required_tiers_empty(self):
+        """验证：空文本不检测到任何 Tier（不含 CORE）"""
+        result = SkillSelector.detect_required_tiers("")
+        assert result == []
+
+    def test_detect_required_tiers_click(self):
+        """验证：包含"点击"检测到 INTERACTION"""
+        result = SkillSelector.detect_required_tiers("点击搜索按钮")
+        assert SkillTier.INTERACTION in result
+
+    def test_detect_required_tiers_file(self):
+        """验证：包含"读取文件"检测到 FILE"""
+        result = SkillSelector.detect_required_tiers("读取文件 /tmp/test.txt")
+        assert SkillTier.FILE in result
+
+    def test_detect_required_tiers_shell(self):
+        """验证：包含"执行命令"检测到 SHELL"""
+        result = SkillSelector.detect_required_tiers("执行命令 ls -la")
+        assert SkillTier.SHELL in result
+
+    def test_detect_required_tiers_sorted_by_risk(self):
+        """验证：多 Tier 检测结果按风险升序排列"""
+        result = SkillSelector.detect_required_tiers(
+            "先读取文件 /tmp/test.txt，再执行命令 ls -la"
+        )
+        # File (index 2) 应排在 Shell (index 3) 之前
+        assert result == [SkillTier.FILE, SkillTier.SHELL]
+
+    def test_estimate_tier_description(self):
+        """验证：estimate_tier_description 返回可读描述"""
+        desc = SkillSelector.estimate_tier_description(SkillTier.SHELL)
+        assert isinstance(desc, str)
+        assert len(desc) > 0

@@ -85,7 +85,7 @@ class RedisManager:
             pool = ConnectionPool.from_url(
                 self._redis_url,
                 max_connections=self._max_connections,
-                decode_responses=True,  # 自动将 Redis 返回的 bytes 转换为 str
+                decode_responses=True,
             )
             self._client = aioredis.Redis(connection_pool=pool)
             # 建立连接后立即做一次 ping，确保连接可用

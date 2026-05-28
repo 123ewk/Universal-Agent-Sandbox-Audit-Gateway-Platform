@@ -15,7 +15,7 @@ Shell Skills — Shell 命令执行技能
 """
 import logging
 from app.skills.base import BaseSkill, SkillCategory, SkillContext, SkillResult
-from app.skills.enums import RiskLevel
+from app.skills.enums import RiskLevel, SkillTier
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +48,7 @@ class RunCommandSkill(BaseSkill):
     name = "shell_run"
     description = "在沙箱环境中执行 Shell 命令"
     category = SkillCategory.SHELL
+    tier = SkillTier.SHELL
     risk_level = RiskLevel.L4_SHELL
 
     async def execute(self, context: SkillContext, **params) -> SkillResult:

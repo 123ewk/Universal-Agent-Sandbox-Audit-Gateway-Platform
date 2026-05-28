@@ -17,7 +17,7 @@ import logging
 from typing import Any
 
 from app.skills.base import BaseSkill
-from app.skills.enums import RiskLevel, SkillCategory
+from app.skills.enums import RiskLevel, SkillCategory, SkillTier
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +84,14 @@ class SkillRegistry:
     def list_by_category(self, category: SkillCategory) -> list[BaseSkill]:
         """按分类筛选"""
         return [s for s in self._skills.values() if s.category == category]
+
+    def list_by_tier(self, tier: SkillTier) -> list[BaseSkill]:
+        """按披露层级筛选"""
+        return [s for s in self._skills.values() if s.tier == tier]
+
+    def list_by_tiers(self, tiers: set[SkillTier]) -> list[BaseSkill]:
+        """按多个披露层级筛选"""
+        return [s for s in self._skills.values() if s.tier in tiers]
 
     def count(self) -> int:
         """已注册 Skill 总数"""

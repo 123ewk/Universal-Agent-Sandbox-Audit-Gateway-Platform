@@ -17,7 +17,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
 
-from app.skills.enums import SkillCategory  # noqa: F401 — 重导出供外部使用
+from app.skills.enums import SkillCategory, SkillTier  # noqa: F401 — 重导出供外部使用
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +102,7 @@ class BaseSkill(ABC):
     name: str = ""
     description: str = ""
     category: SkillCategory = SkillCategory.BROWSER
+    tier: SkillTier = SkillTier.CORE  # 渐进式披露层级，默认 CORE 始终可见
     risk_level: Any = None  # RiskLevel 类型，推迟导入避免循环依赖
 
     def __init_subclass__(cls, **kwargs: Any) -> None:

@@ -9,7 +9,7 @@ Browser Skills — 浏览器操作技能（MVP 8 核心 Skill 中的 5 个）
   L2: click, type（交互）
 """
 from app.skills.base import BaseSkill, SkillCategory, SkillContext, SkillResult
-from app.skills.enums import RiskLevel
+from app.skills.enums import RiskLevel, SkillTier
 
 
 # ====================================================================
@@ -22,6 +22,7 @@ class GotoSkill(BaseSkill):
     name = "browser_goto"
     description = "导航到指定的 URL 地址"
     category = SkillCategory.BROWSER
+    tier = SkillTier.CORE
     risk_level = RiskLevel.L1_READONLY
 
     async def execute(self, context: SkillContext, **params) -> SkillResult:
@@ -37,6 +38,7 @@ class ScreenshotSkill(BaseSkill):
     name = "browser_screenshot"
     description = "截取当前浏览器页面的截图"
     category = SkillCategory.BROWSER
+    tier = SkillTier.CORE
     risk_level = RiskLevel.L1_READONLY
 
     async def execute(self, context: SkillContext, **params) -> SkillResult:
@@ -54,6 +56,7 @@ class ClickSkill(BaseSkill):
     name = "browser_click"
     description = "点击页面上的元素，通过 CSS 选择器或坐标定位"
     category = SkillCategory.BROWSER
+    tier = SkillTier.INTERACTION
     risk_level = RiskLevel.L2_INTERACTION
 
     async def execute(self, context: SkillContext, **params) -> SkillResult:
@@ -68,6 +71,7 @@ class TypeSkill(BaseSkill):
     name = "browser_type"
     description = "在指定的输入框中输入文本内容"
     category = SkillCategory.BROWSER
+    tier = SkillTier.INTERACTION
     risk_level = RiskLevel.L2_INTERACTION
 
     async def execute(self, context: SkillContext, **params) -> SkillResult:
@@ -90,6 +94,7 @@ class ExtractTextSkill(BaseSkill):
     name = "browser_extract_text"
     description = "获取当前页面的所有可见文本内容"
     category = SkillCategory.BROWSER
+    tier = SkillTier.CORE
     risk_level = RiskLevel.L1_READONLY
 
     async def execute(self, context: SkillContext, **params) -> SkillResult:

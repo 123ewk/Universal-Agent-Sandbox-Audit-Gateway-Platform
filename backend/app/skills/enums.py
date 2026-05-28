@@ -18,6 +18,30 @@ class SkillCategory(str, enum.Enum):
     SYSTEM = "system"
 
 
+class SkillTier(str, enum.Enum):
+    """
+    渐进式披露层级
+
+    决定 Skill 在 Agent 执行流程中何时对 LLM 可见。
+    不是安全等级（安全等级走 RiskLevel），而是"使用场景"分组。
+
+      CORE        — 始终可见的基础只读技能
+      INTERACTION — 浏览器交互技能（执行过程中自动解锁）
+      FILE        — 文件操作技能（需要确认后解锁）
+      SHELL       — Shell 执行技能（需人工授权后解锁）
+
+    披露逻辑：
+      Agent 启动 → 只看到 CORE
+      Agent 计划需要"点击/输入" → 自动解锁 INTERACTION
+      Agent 提到"保存/写入" → 弹出确认 → 解锁 FILE
+      Agent 需要执行命令 → 人工审批 → 解锁 SHELL
+    """
+    CORE = "core"
+    INTERACTION = "interaction"
+    FILE = "file"
+    SHELL = "shell"
+
+
 class RiskLevel(enum.IntEnum):
     """
     风险等级（L1-L5）
