@@ -87,7 +87,7 @@ class AuditGateway:
         skill_name: str,
         params: dict[str, Any],
         context: SkillContext,
-        db: AsyncSession,
+        db: AsyncSession | None = None,
         bypass_approval: bool = False,
     ) -> SkillResult | ApprovalRequired:
         """
@@ -97,17 +97,13 @@ class AuditGateway:
             skill_name:     Skill 名称（如 "browser_click"）
             params:         调用参数
             context:        执行上下文（session_id, request_id, sandbox_id）
-            db:             数据库会话（用于写入审计日志和审批记录）
+            db:             数据库会话（可选，None 时跳过审计日志写入）
             bypass_approval: 是否跳过审批（仅用于测试或已审批的重放）
 
         Returns:
             SkillResult | ApprovalRequired
-
-        调用方可通过 isinstance(result, ApprovalRequired) 判断是否需要审批。
         """
         audit_log = None
-        # 使用 datetime.utcnow() 而非 datetime.now(timezone.utc)，
-        # 因为数据库中 expires_at/responded_at 列定义为 timezone-naive DateTime
         start_time = datetime.utcnow()
 
         try:
@@ -125,34 +121,36 @@ class AuditGateway:
                 assessment.score, assessment.reasons,
             )
 
-            # ---- 步骤 3: 记录审计日志 ----
-            audit_log = AuditLog(
-                session_id=context.session_id,
-                step_number=params.get("_step_number", 0),
-                action_type=skill_name,
-                action_input=params,
-                is_high_risk=assessment.requires_approval or assessment.is_blocked,
-                risk_reason=str(assessment.to_dict()),
-                approved=None,  # 尚未审批
-                success=None,   # 尚未执行
-                execution_time_ms=0,
-                action_taken_at=start_time,
-            )
-            db.add(audit_log)
-            await db.flush()  # 获取 audit_log.id
-            await db.refresh(audit_log)
+            # ---- 步骤 3: 记录审计日志（db=None 时跳过） ----
+            if db is not None:
+                audit_log = AuditLog(
+                    session_id=context.session_id,
+                    step_number=params.get("_step_number", 0),
+                    action_type=skill_name,
+                    action_input=params,
+                    is_high_risk=assessment.requires_approval or assessment.is_blocked,
+                    risk_reason=str(assessment.to_dict()),
+                    approved=None,
+                    success=None,
+                    execution_time_ms=0,
+                    action_taken_at=start_time,
+                )
+                db.add(audit_log)
+                await db.flush()
+                await db.refresh(audit_log)
 
             # ---- 步骤 4a: L5 直接拦截 ----
             if assessment.is_blocked:
-                audit_log.success = False
-                audit_log.error_detail = f"安全拦截: {'; '.join(assessment.reasons)}"
-                await db.flush()
+                if audit_log is not None and db is not None:
+                    audit_log.success = False
+                    audit_log.error_detail = f"安全拦截: {'; '.join(assessment.reasons)}"
+                    await db.flush()
                 return SkillResult.fail(
                     f"安全策略拦截此操作: {'; '.join(assessment.reasons)}"
                 )
 
-            # ---- 步骤 4b: L4 需要审批 ----
-            if assessment.requires_approval and not bypass_approval:
+            # ---- 步骤 4b: L4 需要审批（db=None 时跳过审批，直接执行） ----
+            if assessment.requires_approval and not bypass_approval and db is not None:
                 approval = ApprovalRecord(
                     session_id=context.session_id,
                     audit_log_id=audit_log.id,
@@ -183,23 +181,23 @@ class AuditGateway:
                     audit_log_id=audit_log.id,
                 )
 
-            # ---- 步骤 5: 执行 Skill（L1-L3 或 bypass_approval） ----
+            # ---- 步骤 5: 执行 Skill ----
             result = await skill.execute_with_timing(context, **params)
 
-            # ---- 步骤 6: 更新审计日志 ----
-            audit_log.success = result.success
-            audit_log.action_output = {"data": result.data} if result.data else None
-            audit_log.error_detail = result.error
-            audit_log.execution_time_ms = result.execution_time_ms
-            audit_log.approved = True  # 无需审批的自动通过
-            await db.flush()
+            # ---- 步骤 6: 更新审计日志（db=None 时跳过） ----
+            if audit_log is not None and db is not None:
+                audit_log.success = result.success
+                audit_log.action_output = {"data": result.data} if result.data else None
+                audit_log.error_detail = result.error
+                audit_log.execution_time_ms = result.execution_time_ms
+                audit_log.approved = True
+                await db.flush()
 
             return result
 
         except Exception as exc:
             logger.error("AuditGateway 异常: skill=%s, error=%s", skill_name, exc)
-            # 尝试更新审计日志（如果已创建）
-            if audit_log is not None and audit_log.id:
+            if audit_log is not None and audit_log.id and db is not None:
                 try:
                     audit_log.success = False
                     audit_log.error_detail = f"Gateway 异常: {exc}"
@@ -214,7 +212,7 @@ class AuditGateway:
         self,
         approval_record_id: int,
         context: SkillContext,
-        db: AsyncSession,
+        db: AsyncSession | None = None,
     ) -> SkillResult:
         """
         审批通过后继续执行被暂停的 Skill 调用

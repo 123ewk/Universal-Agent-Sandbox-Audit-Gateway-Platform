@@ -80,7 +80,7 @@ class BehaviorDetector:
             # 通过 WebSocket 推送风险告警
             if ws_manager and state.session_id:
                 for trigger in assessment.triggers:
-                    await ws_manager.broadcast(
+                    await ws_manager.broadcast_message(
                         state.session_id,
                         audit_risk_detected(
                             state.session_id,
@@ -90,7 +90,7 @@ class BehaviorDetector:
                                 reasons=[trigger.reason],
                                 requires_approval=assessment.requires_approval,
                             ),
-                        ),
+                        ).to_dict(),
                     )
 
         return assessment

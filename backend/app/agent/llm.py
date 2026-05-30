@@ -60,6 +60,8 @@ class LLMResponse:
         return None
 
 
+
+
 # ====================================================================
 # 模型定价表（USD / 1M tokens）
 # ====================================================================
@@ -120,6 +122,11 @@ class LLMClient:
         """
         发送消息到 LLM，返回统一响应
 
+        使用 agenerate() 而非 ainvoke()，因为：
+          ainvoke() 只返回 AIMessage，丢弃了 ChatResult.llm_output（含 token_usage）
+          agenerate() 返回完整 ChatResult，llm_output 中保留了 token_usage
+          这是获取 DeepSeek token 用量最可靠的路径。
+
         Args:
             messages:    OpenAI 格式的消息列表 [{"role": "...", "content": "..."}]
             tools:       Function calling 工具列表
@@ -130,15 +137,41 @@ class LLMClient:
             LLMResponse: content + tool_calls + tokens + cost
         """
         chat_model = self._get_chat_model(model)
-        kwargs: dict[str, Any] = {"messages": messages}
 
+        # 注意：不能使用 bind_tools()，因为它返回 RunnableBinding 而非 BaseChatModel，
+        # agenerate() 方法只存在于 BaseChatModel 上。改为通过 kwargs 直接传递 tools。
+        generate_kwargs: dict[str, Any] = {}
         if tools:
-            kwargs["tools"] = tools
-            kwargs["tool_choice"] = tool_choice
+            generate_kwargs["tools"] = tools
+            generate_kwargs["tool_choice"] = tool_choice
 
         try:
-            response = await chat_model.ainvoke(**kwargs)
-            return self._parse_response(response)
+            result = await chat_model.agenerate([messages], **generate_kwargs)
+            input_tokens, output_tokens = self._extract_tokens_from_llm_result(result)
+
+            # 从第一代提取 AIMessage
+            raw = (
+                result.generations[0][0].message
+                if result.generations and result.generations[0]
+                else None
+            )
+
+            if raw is None:
+                logger.error("LLM 返回空 generations: provider=%s, model=%s",
+                             self.provider, model or self.model_name)
+                return LLMResponse(
+                    content="LLM 返回空结果",
+                    model=model or self.model_name,
+                )
+
+            # agenerate() 可能返回 AIMessage 或 dict，统一转换
+            ai_message = self._to_ai_message(raw)
+
+            return self._parse_response(
+                ai_message,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+            )
         except Exception as exc:
             logger.error("LLM 调用失败: provider=%s, model=%s, error=%s",
                          self.provider, model or self.model_name, exc)
@@ -243,14 +276,45 @@ class LLMClient:
     # 响应解析
     # ================================================================
 
-    def _parse_response(self, response) -> LLMResponse:
-        """解析 langchain 响应为 LLMResponse"""
+    @staticmethod
+    def _to_ai_message(raw):
+        """
+        将 agenerate() 返回的 message 统一转为 AIMessage
+
+        agenerate() 的 generations[0][0].message 在不同 langchain 版本中
+        可能是 AIMessage 或 dict，这里做统一转换。
+        """
+        from langchain_core.messages import AIMessage
+
+        if isinstance(raw, AIMessage):
+            return raw
+        if isinstance(raw, dict):
+            return AIMessage(
+                content=raw.get("content", ""),
+                tool_calls=raw.get("tool_calls", []),
+                response_metadata=raw.get("response_metadata", {}),
+            )
+        return AIMessage(content=str(raw))
+
+    def _parse_response(
+        self,
+        response,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+    ) -> LLMResponse:
+        """
+        解析 langchain AIMessage 为 LLMResponse
+
+        Args:
+            response:     AIMessage 实例
+            input_tokens:  从 ChatResult.llm_output 提取的 prompt_tokens
+            output_tokens: 从 ChatResult.llm_output 提取的 completion_tokens
+        """
         from langchain_core.messages import AIMessage
 
         content = ""
         tool_calls: list[dict[str, Any]] = []
         model = ""
-        tokens_used = 0
 
         if isinstance(response, AIMessage):
             content = response.content if isinstance(response.content, str) else str(response.content)
@@ -268,20 +332,34 @@ class LLMClient:
                         ),
                     })
 
-            # 提取 token 用量
-            if hasattr(response, "usage_metadata") and response.usage_metadata:
-                tokens_used = (
-                    response.usage_metadata.get("input_tokens", 0)
-                    + response.usage_metadata.get("output_tokens", 0)
-                )
+        tokens_used = input_tokens + output_tokens
 
         return LLMResponse(
             content=content,
             tool_calls=tool_calls,
             model=model or self.model_name,
             tokens_used=tokens_used,
-            cost=self._calculate_cost(model or self.model_name, tokens_used, 0),
+            cost=self._calculate_cost(model or self.model_name, input_tokens, output_tokens),
         )
+
+    @staticmethod
+    def _extract_tokens_from_llm_result(result) -> tuple[int, int]:
+        """
+        从 ChatResult.llm_output 提取 (input_tokens, output_tokens)
+
+        agenerate() 返回完整 ChatResult，llm_output 中保留 token_usage，
+        这是获取 token 用量最直接的路径，无需依赖 Callback 或 AIMessage 元数据。
+        """
+        llm_output: dict = getattr(result, "llm_output", None) or {}
+        if isinstance(llm_output, dict):
+            token_usage = llm_output.get("token_usage", {})
+            if token_usage:
+                inp = int(token_usage.get("prompt_tokens", 0)
+                          or token_usage.get("input_tokens", 0))
+                out = int(token_usage.get("completion_tokens", 0)
+                          or token_usage.get("output_tokens", 0))
+                return inp, out
+        return 0, 0
 
     def _calculate_cost(self, model: str, input_tokens: int, output_tokens: int) -> Decimal:
         """计算 LLM 调用费用"""

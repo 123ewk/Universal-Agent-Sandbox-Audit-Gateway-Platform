@@ -102,7 +102,10 @@ class WebSocketManager:
     async def broadcast_message(
         self, session_id: int, message: dict
     ) -> int:
-        """广播预构建消息（EventBus 使用，不做 seq 编号）"""
+        """广播预构建消息（自动添加 seq 编号）"""
+        seq = self._seq.get(session_id, 0) + 1
+        self._seq[session_id] = seq
+        message["seq"] = seq
         return await self._conn.broadcast(session_id, message)
 
 

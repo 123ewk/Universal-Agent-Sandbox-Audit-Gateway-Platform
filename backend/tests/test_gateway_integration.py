@@ -104,27 +104,28 @@ class TestAuditGateway:
     """验证审计网关的核心流程"""
 
     async def test_l1_skill_direct_execution(self, gateway, context, db):
-        """验证：L1 Skill（Goto）直接执行，写入审计日志"""
+        """验证：L1 Skill（Goto）无沙箱时返回错误，审计日志记录失败"""
         result = await gateway.invoke(
             "browser_goto", {"url": "https://example.com"}, context, db,
         )
         assert isinstance(result, SkillResult)
-        assert result.success is True
+        assert result.success is False
+        assert "沙箱未初始化" in result.error
 
-        # 验证审计日志已写入
+        # 验证审计日志已写入（含失败记录）
         logs = (await db.execute(select(AuditLog))).scalars().all()
         assert len(logs) == 1
         assert logs[0].action_type == "browser_goto"
-        assert logs[0].approved is True
-        assert logs[0].success is True
+        assert logs[0].success is False
 
     async def test_l2_skill_click_is_logged(self, gateway, context, db):
-        """验证：L2 Click 放行并记录日志"""
+        """验证：L2 Click 无沙箱时返回错误"""
         result = await gateway.invoke(
             "browser_click", {"selector": "#btn"}, context, db,
         )
         assert isinstance(result, SkillResult)
-        assert result.success is True
+        assert result.success is False
+        assert "沙箱未初始化" in result.error
 
     async def test_l4_skill_requires_approval(self, gateway, context, db):
         """验证：L4 Shell 执行需要创建审批记录"""

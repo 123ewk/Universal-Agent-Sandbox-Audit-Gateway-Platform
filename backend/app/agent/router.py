@@ -80,9 +80,11 @@ _runtime: Optional[AgentRuntime] = None
 def get_runtime() -> AgentRuntime:
     global _runtime
     if _runtime is None:
+        from app.sandbox import get_sandbox_provider
         _runtime = AgentRuntime(
             llm_client=LLMClient(),
             gateway=AuditGateway(),
+            sandbox_provider=get_sandbox_provider(),
         )
     return _runtime
 
@@ -110,7 +112,7 @@ async def create_task(
         task_description=req.task_description,
         session_status=SessionStatus.PENDING,
         total_steps=req.max_steps,
-        started_at=datetime.now(timezone.utc),
+        started_at=datetime.utcnow(),
     )
     db.add(session_model)
     await db.commit()
@@ -138,7 +140,7 @@ async def create_task(
     logger.info("[Router] 任务已创建: session_id=%d, task='%s'",
                 session_id, req.task_description[:80])
 
-    return APIResponse.ok(TaskResponse(
+    return APIResponse.success(data=TaskResponse(
         task_id=session_id,
         session_id=session_id,
         status=SessionStatus.PENDING.value,
@@ -167,7 +169,7 @@ async def get_task_status(
         raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
 
     if live:
-        return APIResponse.ok(TaskStatusResponse(
+        return APIResponse.success(data=TaskStatusResponse(
             task_id=task_id,
             session_id=task_id,
             task_description=live.task_description,
@@ -183,7 +185,7 @@ async def get_task_status(
         ))
 
     # 只从数据库获取
-    return APIResponse.ok(TaskStatusResponse(
+    return APIResponse.success(data=TaskStatusResponse(
         task_id=task_id,
         session_id=task_id,
         task_description=session_model.task_description,
@@ -238,7 +240,7 @@ async def list_tasks(
                 s.updated_at.isoformat() if s.updated_at else None
             ),
         ))
-    return APIResponse.ok(tasks)
+    return APIResponse.success(data=tasks)
 
 
 # ====================================================================

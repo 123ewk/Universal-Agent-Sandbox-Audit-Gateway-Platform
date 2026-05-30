@@ -200,7 +200,7 @@ async def _persist_session(session_id: int, state: AgentState) -> None:
                 session_model.total_steps = len(state.plan_steps)
                 session_model.llm_cost = state.total_llm_cost
                 session_model.error_message = state.error_message
-                session_model.finished_at = datetime.now(timezone.utc)
+                session_model.finished_at = datetime.utcnow()
                 session_model.execution_log = {
                     "total_steps": state.total_steps_executed,
                     "total_tokens": state.total_tokens_used,

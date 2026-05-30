@@ -269,6 +269,11 @@ class AgentState(BaseModel):
         return max(0, len(self.plan_steps) - self.current_step_index)
 
     @property
+    def has_any_success(self) -> bool:
+        """是否至少有一个步骤执行成功"""
+        return any(s.success for s in self.execution_history)
+
+    @property
     def progress_pct(self) -> float:
         """执行进度百分比"""
         if not self.plan_steps:
@@ -282,11 +287,11 @@ class AgentState(BaseModel):
     def transition_to(self, status: AgentStatus) -> None:
         """状态转换（仅用于日志追踪，不影响 LangGraph 状态机）"""
         valid_transitions = {
-            AgentStatus.IDLE: {AgentStatus.PLANNING},
+            AgentStatus.IDLE: {AgentStatus.PLANNING, AgentStatus.FAILED},
             AgentStatus.PLANNING: {AgentStatus.EXECUTING, AgentStatus.FAILED},
             AgentStatus.EXECUTING: {AgentStatus.OBSERVING, AgentStatus.WAITING_APPROVAL, AgentStatus.FAILED},
-            AgentStatus.OBSERVING: {AgentStatus.REFLECTING, AgentStatus.EXECUTING},
-            AgentStatus.REFLECTING: {AgentStatus.EXECUTING, AgentStatus.COMPLETED, AgentStatus.FAILED},
+            AgentStatus.OBSERVING: {AgentStatus.REFLECTING, AgentStatus.EXECUTING, AgentStatus.PLANNING},
+            AgentStatus.REFLECTING: {AgentStatus.EXECUTING, AgentStatus.COMPLETED, AgentStatus.FAILED, AgentStatus.PLANNING},
             AgentStatus.WAITING_APPROVAL: {AgentStatus.EXECUTING, AgentStatus.CANCELLED},
         }
         allowed = valid_transitions.get(self.agent_status, set())

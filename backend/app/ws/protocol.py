@@ -86,6 +86,7 @@ class StepPayload(BaseModel):
     success: bool = True
     execution_time_ms: int = 0
     error: Optional[str] = None
+    result_data: Optional[dict[str, Any]] = None
 
 
 class NavigationPayload(BaseModel):

@@ -221,7 +221,7 @@ class TestSkillRegistry:
 
         count = registry.discover()
         # 应发现所有 8 个具体 Skill
-        assert count == 8
+        assert count == 9  # 5 browser + 2 file + 1 shell + 1 wait
 
         # 验证各分类的 Skill 都在
         names = {s.name for s in registry.list_all()}
@@ -241,24 +241,25 @@ class TestSkillRegistry:
 
 
 class TestBrowserSkills:
-    """验证 Browser Skills 参数校验"""
+    """验证 Browser Skills 参数校验 + 无沙箱时报错"""
 
     @pytest.fixture
     def ctx(self):
         return SkillContext(session_id=1)
 
     async def test_goto_missing_url(self, ctx):
-        """验证：缺少 url 参数返回失败"""
+        """验证：缺少 url 参数返回失败（参数校验优先于沙箱检查）"""
         skill = GotoSkill()
         result = await skill.execute(ctx)
         assert result.success is False
         assert "url" in result.error
 
     async def test_goto_with_url(self, ctx):
-        """验证：正常导航"""
+        """验证：有 url 但无沙箱时返回明确错误"""
         skill = GotoSkill()
         result = await skill.execute(ctx, url="https://example.com")
-        assert result.success is True
+        assert result.success is False
+        assert "沙箱未初始化" in result.error
 
     async def test_click_missing_selector(self, ctx):
         """验证：缺少 selector 参数返回失败"""
@@ -268,28 +269,32 @@ class TestBrowserSkills:
         assert "selector" in result.error
 
     async def test_click_with_selector(self, ctx):
-        """验证：正常点击"""
+        """验证：有 selector 但无沙箱时返回错误"""
         skill = ClickSkill()
         result = await skill.execute(ctx, selector="#submit-btn")
-        assert result.success is True
+        assert result.success is False
+        assert "沙箱未初始化" in result.error
 
     async def test_screenshot_always_succeeds(self, ctx):
-        """验证：截图总是成功"""
+        """验证：无沙箱时截图返回错误"""
         skill = ScreenshotSkill()
         result = await skill.execute(ctx)
-        assert result.success is True
+        assert result.success is False
+        assert "沙箱未初始化" in result.error
 
     async def test_extract_text_no_selector(self, ctx):
-        """验证：不传 selector 时默认提取 body 文本"""
+        """验证：无 selector 无沙箱时返回错误"""
         skill = ExtractTextSkill()
         result = await skill.execute(ctx)
-        assert result.success is True
+        assert result.success is False
+        assert "沙箱未初始化" in result.error
 
     async def test_extract_text_with_selector(self, ctx):
-        """验证：传入 CSS 选择器限定区域"""
+        """验证：有 selector 无沙箱时返回错误"""
         skill = ExtractTextSkill()
         result = await skill.execute(ctx, selector="#main-content")
-        assert result.success is True
+        assert result.success is False
+        assert "沙箱未初始化" in result.error
 
     async def test_type_missing_selector(self, ctx):
         """验证：缺少 selector 返回失败"""
@@ -298,10 +303,11 @@ class TestBrowserSkills:
         assert result.success is False
 
     async def test_type_with_all_params(self, ctx):
-        """验证：正常输入"""
+        """验证：有 selector 无沙箱时返回错误"""
         skill = TypeSkill()
         result = await skill.execute(ctx, selector="#input", text="hello world")
-        assert result.success is True
+        assert result.success is False
+        assert "沙箱未初始化" in result.error
 
 
 class TestFileSkills:

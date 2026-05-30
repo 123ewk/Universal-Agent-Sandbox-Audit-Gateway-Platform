@@ -194,18 +194,20 @@ class TestScreenshotManager:
 
 
 class TestSkillBackwardCompat:
-    """Skills 向后兼容 — 无 engine 时降级 Mock"""
+    """Skills 无沙箱时返回明确错误（不再降级 Mock）"""
 
     @pytest.mark.asyncio
     async def test_goto_without_engine(self):
+        """无沙箱时 goto 应返回失败，提示沙箱未初始化"""
         ctx = SkillContext(session_id=1)
         skill = GotoSkill()
         result = await skill.execute(ctx, url="https://example.com")
-        assert result.success is True
-        assert result.data.get("status") == "navigation_scheduled"
+        assert result.success is False
+        assert "沙箱未初始化" in result.error
 
     @pytest.mark.asyncio
     async def test_goto_without_engine_missing_url(self):
+        """缺少 url 参数返回失败（参数校验优先于沙箱检查）"""
         ctx = SkillContext()
         skill = GotoSkill()
         result = await skill.execute(ctx)
@@ -214,14 +216,16 @@ class TestSkillBackwardCompat:
 
     @pytest.mark.asyncio
     async def test_click_without_engine(self):
+        """无沙箱时 click 应返回失败"""
         ctx = SkillContext()
         skill = ClickSkill()
         result = await skill.execute(ctx, selector="#btn")
-        assert result.success is True
-        assert result.data.get("status") == "click_scheduled"
+        assert result.success is False
+        assert "沙箱未初始化" in result.error
 
     @pytest.mark.asyncio
     async def test_click_without_engine_missing_selector(self):
+        """缺少 selector 返回失败（参数校验优先）"""
         ctx = SkillContext()
         skill = ClickSkill()
         result = await skill.execute(ctx)
@@ -229,26 +233,30 @@ class TestSkillBackwardCompat:
 
     @pytest.mark.asyncio
     async def test_type_without_engine(self):
+        """无沙箱时 type 应返回失败"""
         ctx = SkillContext()
         skill = TypeSkill()
         result = await skill.execute(ctx, selector="#q", text="hello")
-        assert result.success is True
-        assert result.data.get("text_length") == 5
+        assert result.success is False
+        assert "沙箱未初始化" in result.error
 
     @pytest.mark.asyncio
     async def test_screenshot_without_engine(self):
+        """无沙箱时 screenshot 应返回失败"""
         ctx = SkillContext()
         skill = ScreenshotSkill()
         result = await skill.execute(ctx)
-        assert result.success is True
+        assert result.success is False
+        assert "沙箱未初始化" in result.error
 
     @pytest.mark.asyncio
     async def test_extract_text_without_engine(self):
+        """无沙箱时 extract_text 应返回失败"""
         ctx = SkillContext()
         skill = ExtractTextSkill()
         result = await skill.execute(ctx, selector="body")
-        assert result.success is True
-        assert result.data.get("text_length") == 0
+        assert result.success is False
+        assert "沙箱未初始化" in result.error
 
 
 class TestSandboxEngineIntegration:

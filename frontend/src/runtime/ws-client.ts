@@ -76,7 +76,7 @@ export class WSClient {
 
     const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws'
     const host = window.location.host
-    const url = `${protocol}://${host}/ws/sessions/${this.sessionId}`
+    const url = `${protocol}://${host}/api/v1/ws/sessions/${this.sessionId}`
 
     try {
       this.ws = new WebSocket(url)

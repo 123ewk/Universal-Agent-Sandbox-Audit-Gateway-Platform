@@ -164,6 +164,14 @@ class AgentGraph:
         logger.info("[Plan] 开始规划任务: %s", state.task_description[:80])
         state.transition_to(AgentStatus.PLANNING)
 
+        # 推送 planning 事件到前端
+        if self.ws_manager:
+            await self.ws_manager.broadcast_message(
+                state.session_id,
+                {"session_id": state.session_id, "event": "agent.planning",
+                 "timestamp": datetime.now(timezone.utc).isoformat(), "payload": {}},
+            )
+
         # 如果已经失败太多次，直接返回失败
         if state.total_steps_executed >= state.max_steps:
             state.error_message = f"超过最大执行步数 ({state.max_steps})"
@@ -216,6 +224,21 @@ class AgentGraph:
                 len(plan_steps), response.cost,
             )
 
+            # 推送 plan.completed 事件到前端（包含步骤列表）
+            if self.ws_manager:
+                await self.ws_manager.broadcast_message(
+                    state.session_id,
+                    {
+                        "session_id": state.session_id,
+                        "event": "agent.plan.completed",
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "payload": {
+                            "steps": [step.model_dump() for step in plan_steps],
+                            "total_steps": len(plan_steps),
+                        },
+                    },
+                )
+
         except Exception as exc:
             logger.error("[Plan] 规划失败: %s", exc)
             state.error_message = f"规划失败: {exc}"
@@ -242,6 +265,10 @@ class AgentGraph:
           5. 处理审批等待（ApprovalRequired）
           6. 记录 StepRecord
         """
+        # 如果前置节点已将状态置为终态，直接跳过
+        if state.is_finished:
+            return {}
+
         step = state.current_plan_step
         if step is None:
             state.error_message = "没有可执行的步骤"
@@ -259,7 +286,7 @@ class AgentGraph:
         if step.required_tier:
             from app.skills.enums import SkillTier
             try:
-                tier = SkillTier(step.required_tier)
+                tier = SkillTier(step.required_tier.lower())
                 selector.unlock(tier)
             except ValueError:
                 logger.warning("无效的 Tier: %s", step.required_tier)
@@ -304,14 +331,14 @@ class AgentGraph:
                         step_number=step.step_number,
                         risk_score=result.assessment.score if result.assessment else 0,
                     )
-                    await self.ws_manager.broadcast(
+                    await self.ws_manager.broadcast_message(
                         state.session_id,
                         approval_required(state.session_id, ApprovalPayload(
                             approval_id=approval_req.id,
                             skill_name=step.skill_name,
                             risk_score=result.assessment.score if result.assessment else 0,
                             step_number=step.step_number,
-                        )),
+                        )).to_dict(),
                     )
                     # 等待审批结果
                     await approval_req.event.wait()
@@ -345,7 +372,11 @@ class AgentGraph:
 
         # Phase 7: WebSocket 推送步骤完成事件
         if self.ws_manager:
-            from app.ws.protocol import StepPayload, agent_step_completed, agent_step_failed
+            from app.ws.protocol import (
+                StepPayload, ScreenshotPayload,
+                agent_step_completed, agent_step_failed,
+                sandbox_screenshot,
+            )
             payload = StepPayload(
                 step_number=step.step_number,
                 skill_name=step.skill_name,
@@ -353,10 +384,40 @@ class AgentGraph:
                 success=record.success,
                 execution_time_ms=record.execution_time_ms,
                 error=record.error_message,
+                result_data=record.result_data if record.success else None,
             )
             msg = agent_step_completed(state.session_id, payload) if record.success \
                 else agent_step_failed(state.session_id, payload)
-            await self.ws_manager.broadcast(state.session_id, msg)
+            await self.ws_manager.broadcast_message(state.session_id, msg.to_dict())
+
+            # 截图/文本提取成功后，额外推送 sandbox.screenshot / sandbox.page.info 事件
+            if record.success and record.result_data:
+                data = record.result_data
+                if step.skill_name == "browser_screenshot" and data.get("filename"):
+                    ss_payload = ScreenshotPayload(
+                        path=data.get("path", ""),
+                        filename=data["filename"],
+                        size_bytes=data.get("size_bytes", 0),
+                        step_number=step.step_number,
+                    )
+                    await self.ws_manager.broadcast_message(
+                        state.session_id,
+                        sandbox_screenshot(state.session_id, ss_payload).to_dict(),
+                    )
+                elif step.skill_name == "browser_extract_text" and data.get("text"):
+                    await self.ws_manager.broadcast_message(
+                        state.session_id,
+                        {
+                            "session_id": state.session_id,
+                            "event": "sandbox.page.info",
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "payload": {
+                                "text_preview": data["text"][:500],
+                                "text_length": data.get("text_length", 0),
+                                "selector": data.get("selector", "body"),
+                            },
+                        },
+                    )
 
         return {
             "execution_history": state.execution_history,
@@ -377,6 +438,10 @@ class AgentGraph:
           5. 裁剪 Working Context（如超限）
         """
         logger.info("[Observe] 处理观察数据")
+
+        # 如果前置节点已将状态置为终态，直接跳过
+        if state.is_finished:
+            return {}
 
         state.transition_to(AgentStatus.OBSERVING)
 
@@ -453,6 +518,10 @@ class AgentGraph:
         """
         logger.info("[Reflect] 评估执行结果")
 
+        # 如果前置节点已将状态置为终态，直接跳过
+        if state.is_finished:
+            return {}
+
         state.transition_to(AgentStatus.REFLECTING)
 
         # Phase 7: 跨步骤行为检测
@@ -484,13 +553,18 @@ class AgentGraph:
 
             return {"agent_status": state.agent_status, "needs_replan": False}
 
-        # 自动决策：最后一步且成功
+        # 自动决策：成功 → 自动继续或完成（不调 LLM，节省成本）
         last_step = state.last_step
         if last_step and last_step.success:
             if state.current_step_index >= len(state.plan_steps) - 1:
                 state.transition_to(AgentStatus.COMPLETED)
                 logger.info("[Reflect] 所有步骤执行完成")
                 return {"agent_status": state.agent_status, "needs_replan": False}
+            else:
+                # 成功且还有后续步骤 → 自动继续，不调 LLM
+                logger.info("[Reflect] Step %d 成功，自动继续", last_step.step_number)
+                state.current_step_index += 1
+                return {"current_step_index": state.current_step_index, "needs_replan": False}
 
         # 自动决策：连续失败检测
         recent = state.execution_history[-_MAX_CONSECUTIVE_FAILURES:]
@@ -521,7 +595,12 @@ class AgentGraph:
         if decision_type == "continue":
             state.current_step_index += 1
             if state.current_step_index >= len(state.plan_steps):
-                state.transition_to(AgentStatus.COMPLETED)
+                if state.has_any_success:
+                    state.transition_to(AgentStatus.COMPLETED)
+                else:
+                    state.transition_to(AgentStatus.FAILED)
+                    state.error_message = "所有步骤执行失败，无法完成任务"
+                    logger.error("[Reflect] 所有 %d 步均失败，标记为 FAILED", len(state.plan_steps))
                 return {"agent_status": state.agent_status, "needs_replan": False}
             return {"current_step_index": state.current_step_index, "needs_replan": False}
 
@@ -541,7 +620,11 @@ class AgentGraph:
             return {"needs_replan": True}
 
         elif decision_type == "complete":
-            state.transition_to(AgentStatus.COMPLETED)
+            if state.has_any_success:
+                state.transition_to(AgentStatus.COMPLETED)
+            else:
+                state.transition_to(AgentStatus.FAILED)
+                state.error_message = "LLM 判定完成但无任何成功步骤"
             return {"agent_status": state.agent_status, "needs_replan": False}
 
         else:  # abort
@@ -665,6 +748,4 @@ class AgentGraph:
                 self._engines.pop(session_id, None)
                 logger.info("[AgentGraph] SandboxEngine 已清理: session=%d", session_id)
 
-            # Phase 7: 清理 WS 房间
-            if self.ws_manager:
-                await self.ws_manager.cleanup_session(session_id)
+            # 注：WS cleanup 由 AgentRuntime.run() 统一处理，此处不重复调用

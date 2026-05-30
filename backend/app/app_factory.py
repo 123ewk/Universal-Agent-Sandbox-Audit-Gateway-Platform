@@ -117,11 +117,27 @@ def create_app() -> FastAPI:
             await init_db()
         except Exception as exc:
             logger.warning("DB 初始化跳过: %s", exc)
+        try:
+            from app.skills import init_skills
+            skill_count = init_skills()
+            logger.info("Skills 注册完成: 共 %d 个", skill_count)
+        except Exception as exc:
+            logger.warning("Skills 初始化跳过: %s", exc)
+        try:
+            from app.sandbox import init_sandbox
+            await init_sandbox()
+        except Exception as exc:
+            logger.warning("沙箱初始化跳过: %s", exc)
         _wire_event_bus()
         logger.info("ShadowOS 启动完成")
         yield
         # Shutdown
         logger.info("ShadowOS 关闭中...")
+        try:
+            from app.sandbox import shutdown_sandbox
+            await shutdown_sandbox()
+        except Exception as exc:
+            logger.warning("沙箱关闭异常: %s", exc)
         try:
             from app.database import close_db
             await close_db()

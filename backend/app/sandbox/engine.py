@@ -380,6 +380,37 @@ class SandboxEngine:
             elapsed = int((time.monotonic() - start) * 1000)
             return ActionResult.fail(f"提取文本失败: selector={selector}, error={exc}")
 
+    async def wait(
+        self,
+        ms: int = 2000,
+    ) -> ActionResult:
+        """
+        等待指定毫秒数
+
+        用于等待页面动画/加载完成。使用 Playwright 的 page.wait_for_timeout()，
+        比 asyncio.sleep 更准确（会等待页面 JS 执行完成）。
+
+        Args:
+            ms: 等待毫秒数
+
+        Returns:
+            ActionResult
+        """
+        if not self._page:
+            return ActionResult.fail("浏览器未初始化")
+
+        start = time.monotonic()
+        try:
+            await self._page.wait_for_timeout(ms)
+            elapsed = int((time.monotonic() - start) * 1000)
+            return ActionResult.ok(
+                data={"waited_ms": ms},
+                execution_time_ms=elapsed,
+            )
+        except Exception as exc:
+            elapsed = int((time.monotonic() - start) * 1000)
+            return ActionResult.fail(f"等待失败: {exc}")
+
     # ================================================================
     # 页面信息
     # ================================================================

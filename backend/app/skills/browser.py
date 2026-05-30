@@ -32,7 +32,7 @@ class GotoSkill(BaseSkill):
 
         engine = context.sandbox_engine
         if engine is None:
-            return SkillResult.ok(data={"url": url, "status": "navigation_scheduled"})
+            return SkillResult.fail("沙箱未初始化：无法执行浏览器导航，请检查 Playwright 是否正确安装")
 
         result = await engine.navigate(url)
         return SkillResult(
@@ -52,7 +52,7 @@ class ScreenshotSkill(BaseSkill):
     async def execute(self, context: SkillContext, **params) -> SkillResult:
         engine = context.sandbox_engine
         if engine is None:
-            return SkillResult.ok(data={"screenshot_path": None})
+            return SkillResult.fail("沙箱未初始化：无法截图，请检查 Playwright 是否正确安装")
 
         result = await engine.screenshot()
         return SkillResult(
@@ -81,7 +81,7 @@ class ClickSkill(BaseSkill):
 
         engine = context.sandbox_engine
         if engine is None:
-            return SkillResult.ok(data={"selector": selector, "status": "click_scheduled"})
+            return SkillResult.fail("沙箱未初始化：无法执行点击操作，请检查 Playwright 是否正确安装")
 
         result = await engine.click(selector)
         return SkillResult(
@@ -93,7 +93,7 @@ class ClickSkill(BaseSkill):
 class TypeSkill(BaseSkill):
     """在页面元素中输入文本（交互，L2）"""
     name = "browser_type"
-    description = "在指定的输入框中输入文本内容"
+    description = "在指定的输入框（input/textarea）中输入文本内容，需要 selector 和 text 参数"
     category = SkillCategory.BROWSER
     tier = SkillTier.INTERACTION
     risk_level = RiskLevel.L2_INTERACTION
@@ -106,9 +106,42 @@ class TypeSkill(BaseSkill):
 
         engine = context.sandbox_engine
         if engine is None:
-            return SkillResult.ok(data={"selector": selector, "text_length": len(text)})
+            return SkillResult.fail("沙箱未初始化：无法执行输入操作，请检查 Playwright 是否正确安装")
 
         result = await engine.type_text(selector, text)
+        return SkillResult(
+            success=result.success, data=result.data,
+            error=result.error, execution_time_ms=result.execution_time_ms,
+        )
+
+
+class WaitSkill(BaseSkill):
+    """等待页面加载或指定时间（只读，L1）"""
+    name = "browser_wait"
+    description = "等待页面加载完成或等待指定的毫秒数"
+    category = SkillCategory.BROWSER
+    tier = SkillTier.CORE
+    risk_level = RiskLevel.L1_READONLY
+
+    param_schema: dict = {
+        "type": "object",
+        "properties": {
+            "ms": {
+                "type": "integer",
+                "description": "等待的毫秒数（默认 2000）",
+                "default": 2000,
+            },
+        },
+    }
+
+    async def execute(self, context: SkillContext, **params) -> SkillResult:
+        import asyncio
+        ms = params.get("ms", 2000)
+        engine = context.sandbox_engine
+        if engine is None:
+            return SkillResult.fail("沙箱未初始化：无法执行等待操作，请检查 Playwright 是否正确安装")
+
+        result = await engine.wait(ms)
         return SkillResult(
             success=result.success, data=result.data,
             error=result.error, execution_time_ms=result.execution_time_ms,
@@ -135,11 +168,7 @@ class ExtractTextSkill(BaseSkill):
 
         engine = context.sandbox_engine
         if engine is None:
-            return SkillResult.ok(data={
-                "selector": selector,
-                "text_length": 0,
-                "content_preview": "",
-            })
+            return SkillResult.fail("沙箱未初始化：无法提取页面文本，请检查 Playwright 是否正确安装")
 
         result = await engine.extract_text(selector)
         return SkillResult(
