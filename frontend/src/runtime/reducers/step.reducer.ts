@@ -1,15 +1,16 @@
 /**
- * Step Reducer — 处理 agent.step.* 事件
+ * Step Reducer — 处理 agent.step.* / agent.thought 事件
  *
- * 监听：agent.step.started / agent.step.completed / agent.step.failed
+ * 监听：agent.step.started / agent.step.completed / agent.step.failed / agent.thought
  * 写入：sessions store（executionHistory 的追加和更新）
  */
-import type { WSMessage, StepPayload } from '../event-types'
+import type { WSMessage, StepPayload, ThoughtPayload } from '../event-types'
 
 export interface StepStoreLike {
   updateStepResult(sessionId: number, payload: StepPayload): void
   setCurrentStep(sessionId: number, stepNumber: number): void
   incrementTotalSteps(sessionId: number): void
+  appendThought(sessionId: number, payload: ThoughtPayload): void
 }
 
 export function createStepReducer(store: StepStoreLike) {
@@ -20,6 +21,11 @@ export function createStepReducer(store: StepStoreLike) {
     const { event, session_id: sessionId, payload } = msg
 
     switch (event) {
+      case 'agent.thought': {
+        store.appendThought(sessionId, payload as unknown as ThoughtPayload)
+        break
+      }
+
       case 'agent.step.started': {
         const p = payload as unknown as StepPayload
         store.setCurrentStep(sessionId, p.step_number)

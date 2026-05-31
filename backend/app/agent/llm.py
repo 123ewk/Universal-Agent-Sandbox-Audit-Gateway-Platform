@@ -146,7 +146,11 @@ class LLMClient:
             generate_kwargs["tool_choice"] = tool_choice
 
         try:
-            result = await chat_model.agenerate([messages], **generate_kwargs)
+            # langchain-core v1.4.0 的 agenerate() 在 _format_for_tracing 中
+            # 直接访问 message.content，但 dict 没有 .content 属性（必须传 BaseMessage）。
+            # 同时 ainvoke() 会丢弃 llm_output 中的 token_usage，所以不能直接用。
+            base_messages = self._to_base_messages(messages)
+            result = await chat_model.agenerate([base_messages], **generate_kwargs)
             input_tokens, output_tokens = self._extract_tokens_from_llm_result(result)
 
             # 从第一代提取 AIMessage
@@ -273,8 +277,45 @@ class LLMClient:
         return self._chat_model
 
     # ================================================================
-    # 响应解析
+    # 消息转换 & 响应解析
     # ================================================================
+
+    @staticmethod
+    def _to_base_messages(messages: list[dict[str, Any]]) -> list:
+        """
+        将 OpenAI 格式的 dict 消息列表转为 langchain BaseMessage 对象
+
+        agenerate() 要求传入 BaseMessage 而非 dict，
+        否则 langchain-core v1.4.0 的 _format_for_tracing 会因
+        'dict' object has no attribute 'content' 崩溃。
+        """
+        from langchain_core.messages import (
+            AIMessage,
+            HumanMessage,
+            SystemMessage,
+            ToolMessage,
+        )
+
+        role_map = {
+            "user": HumanMessage,
+            "system": SystemMessage,
+            "assistant": AIMessage,
+            "tool": ToolMessage,
+        }
+
+        result: list = []
+        for msg in messages:
+            role = msg.get("role", "user")
+            cls = role_map.get(role, HumanMessage)
+            kwargs: dict[str, Any] = {"content": msg.get("content", "")}
+
+            if role == "assistant" and "tool_calls" in msg:
+                kwargs["tool_calls"] = msg["tool_calls"]
+            if role == "tool" and "tool_call_id" in msg:
+                kwargs["tool_call_id"] = msg["tool_call_id"]
+
+            result.append(cls(**kwargs))
+        return result
 
     @staticmethod
     def _to_ai_message(raw):

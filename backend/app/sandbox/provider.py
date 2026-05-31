@@ -25,7 +25,7 @@ SandboxProvider — 沙箱提供者抽象接口
 """
 import logging
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -115,3 +115,29 @@ class SandboxProvider(ABC):
     def get_session_count(self) -> int:
         """返回当前活跃的 Session 数量"""
         ...
+
+    # ================================================================
+    # 持久化方法（Phase 10: Browser Persistence）
+    # ================================================================
+
+    async def persist_context(self, session_id: int) -> bool:
+        """
+        持久化 Session 的浏览器上下文（cookies/storage）
+
+        默认实现不持久化，子类按需 override。
+
+        Returns:
+            True 如果成功持久化，False 如果不支持
+        """
+        return False
+
+    async def restore_context(self, session_id: int) -> Optional[Any]:
+        """
+        恢复 Session 的浏览器上下文
+
+        默认实现不恢复，子类按需 override。
+
+        Returns:
+            BrowserContext 实例或 None
+        """
+        return None

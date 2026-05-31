@@ -107,6 +107,7 @@ class AgentGraph:
         self.ws_manager = ws_manager              # Phase 7
         self.detector = detector                  # Phase 7
         self.approval_manager = approval_manager  # Phase 7
+        self.question_manager = None              # Phase 10: set by AgentRuntime
 
         self._checkpointer = checkpointer or MemorySaver()
         self._engines: dict[int, Any] = {}
@@ -122,13 +123,25 @@ class AgentGraph:
         workflow = StateGraph(AgentState)
 
         # 注册节点
+        workflow.add_node("intent", self._intent_node)
         workflow.add_node("plan", self._plan_node)
         workflow.add_node("execute", self._execute_node)
         workflow.add_node("observe", self._observe_node)
         workflow.add_node("reflect", self._reflect_node)
 
         # 边
-        workflow.set_entry_point("plan")
+        workflow.set_entry_point("intent")
+
+        # intent → plan（正常）或 END（WAITING_USER）
+        workflow.add_conditional_edges(
+            "intent",
+            self._route_after_intent,
+            {
+                "plan": "plan",
+                "end": END,
+            },
+        )
+
         workflow.add_edge("plan", "execute")
         workflow.add_edge("execute", "observe")
         workflow.add_edge("observe", "reflect")
@@ -149,6 +162,155 @@ class AgentGraph:
     # ================================================================
     # 节点实现
     # ================================================================
+
+    async def _intent_node(self, state: AgentState) -> dict[str, Any]:
+        """
+        Intent 节点：LLM 分析任务意图
+
+        流程：
+          1. 构建 Intent Prompt
+          2. 调用 LLM 输出结构化意图结果
+          3. 如果有歧义 → 触发 WAITING_USER
+          4. 写入 intent_result 到 state
+        """
+        logger.info("[Intent] 分析任务意图: %s", state.task_description[:80])
+        state.transition_to(AgentStatus.ANALYZING)
+
+        # 推送 analyzing 状态到前端
+        if self.ws_manager:
+            await self.ws_manager.broadcast_message(
+                state.session_id,
+                {
+                    "session_id": state.session_id,
+                    "event": "agent.planning",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "payload": {},
+                },
+            )
+
+        try:
+            intent_prompt = self.prompt_builder.build_intent_prompt(
+                state.task_description,
+            )
+            messages = [
+                {"role": "system", "content": self.prompt_builder.build_system()},
+                {"role": "user", "content": intent_prompt},
+            ]
+
+            response = await self.llm.chat(messages, tool_choice="none")
+            intent_json = self.llm._extract_json_object(response.content)
+
+            # 解析为 IntentResult
+            from app.agent.state import IntentResult
+            intent = IntentResult(
+                intent_category=intent_json.get("intent_category", "GENERAL_QA"),
+                confidence=float(intent_json.get("confidence", 0.5)),
+                clarifying_questions=intent_json.get("clarifying_questions", []),
+                suggested_tools=intent_json.get("suggested_tools", []),
+                reasoning=intent_json.get("reasoning", ""),
+                reasoning_chain=intent_json.get("reasoning_chain", []),
+            )
+            state.intent_result = intent
+            state.add_cost(response.cost, response.tokens_used)
+
+            # 广播 agent.thought 事件
+            if self.ws_manager:
+                from app.ws.protocol import ThoughtPayload, agent_thought
+                await self.ws_manager.broadcast_message(
+                    state.session_id,
+                    agent_thought(state.session_id, ThoughtPayload(
+                        thought=intent.reasoning,
+                        intent=intent.intent_category,
+                        confidence=intent.confidence,
+                        reasoning_chain=intent.reasoning_chain,
+                        step_number=0,
+                    )).to_dict(),
+                )
+
+            logger.info(
+                "[Intent] 意图分析完成: category=%s, confidence=%.0f%%, questions=%d",
+                intent.intent_category, intent.confidence * 100, len(intent.clarifying_questions),
+            )
+
+            # 如果有歧义 → 暂停等待用户回答
+            if intent.has_questions and self.question_manager:
+                state.transition_to(AgentStatus.WAITING_USER)
+                first_q = intent.clarifying_questions[0]
+                question_text = first_q.get("question", "")
+                options = first_q.get("options", [])
+
+                # 推送 question 事件到前端
+                if self.ws_manager:
+                    from app.ws.protocol import QuestionPayload, agent_question
+                    await self.ws_manager.broadcast_message(
+                        state.session_id,
+                        agent_question(state.session_id, QuestionPayload(
+                            question_id=self.question_manager._next_id,
+                            question_text=question_text,
+                            options=options,
+                            context={"intent": intent.intent_category},
+                        )).to_dict(),
+                    )
+
+                # 等待用户回答（asyncio.Event 暂停）
+                logger.info("[Intent] 需要用户澄清，暂停等待回答: %s", question_text[:80])
+                question = await self.question_manager.ask(
+                    session_id=state.session_id,
+                    question_text=question_text,
+                    options=options,
+                    context={"intent": intent.intent_category, "reasoning": intent.reasoning},
+                )
+
+                # 用户已回答，恢复执行
+                state.transition_to(AgentStatus.ANALYZING)
+                if question.status == "answered":
+                    logger.info("[Intent] 用户已回答: '%s'", question.answer)
+                    # 将用户回答附加到任务描述中
+                    state.task_description = (
+                        f"{state.task_description}\n(用户澄清: {question.answer})"
+                    )
+                else:
+                    logger.info("[Intent] 用户跳过问题 (status=%s)", question.status)
+
+            elif intent.has_questions:
+                # 无 question_manager 时仅广播（向后兼容）
+                state.current_question = {
+                    "question_id": 1,
+                    "questions": intent.clarifying_questions,
+                    "reasoning": intent.reasoning,
+                }
+                if self.ws_manager:
+                    from app.ws.protocol import QuestionPayload, agent_question
+                    first_q = intent.clarifying_questions[0]
+                    await self.ws_manager.broadcast_message(
+                        state.session_id,
+                        agent_question(state.session_id, QuestionPayload(
+                            question_id=1,
+                            question_text=first_q.get("question", ""),
+                            options=first_q.get("options", []),
+                            context={"intent": intent.intent_category},
+                        )).to_dict(),
+                    )
+                logger.info("[Intent] 存在用户澄清建议 (无暂停机制): %d 个问题",
+                           len(intent.clarifying_questions))
+
+        except Exception as exc:
+            logger.error("[Intent] 意图分析失败: %s", exc)
+            # 意图分析失败不致命，创建默认意图继续
+            from app.agent.state import IntentResult
+            state.intent_result = IntentResult(
+                intent_category="GENERAL_QA",
+                confidence=0.5,
+                reasoning=f"意图分析失败: {exc}",
+            )
+
+        return {
+            "intent_result": state.intent_result,
+            "agent_status": state.agent_status,
+            "current_question": state.current_question,
+            "total_llm_cost": str(state.total_llm_cost),
+            "total_tokens_used": state.total_tokens_used,
+        }
 
     async def _plan_node(self, state: AgentState) -> dict[str, Any]:
         """
@@ -209,6 +371,8 @@ class AgentGraph:
                         skill_params=item.get("skill_params", {}),
                         expected_outcome=item.get("expected_outcome", ""),
                         required_tier=item.get("required_tier", "CORE"),
+                        thought=item.get("thought", ""),
+                        reasoning_chain=item.get("reasoning_chain", []),
                     )
                     plan_steps.append(step)
                 except Exception as exc:
@@ -238,6 +402,23 @@ class AgentGraph:
                         },
                     },
                 )
+
+                # 广播 agent.thought 事件 — 每步的思考过程
+                from app.ws.protocol import ThoughtPayload, agent_thought as at_func
+                for step in plan_steps:
+                    thought_text = getattr(step, "thought", None)
+                    reasoning = getattr(step, "reasoning_chain", None)
+                    if thought_text or reasoning:
+                        await self.ws_manager.broadcast_message(
+                            state.session_id,
+                            at_func(state.session_id, ThoughtPayload(
+                                thought=thought_text or step.description,
+                                intent=state.intent_result.intent_category if state.intent_result else "",
+                                confidence=state.intent_result.confidence if state.intent_result else 0.5,
+                                reasoning_chain=reasoning or [],
+                                step_number=step.step_number,
+                            )).to_dict(),
+                        )
 
         except Exception as exc:
             logger.error("[Plan] 规划失败: %s", exc)
@@ -637,6 +818,21 @@ class AgentGraph:
     # ================================================================
 
     @staticmethod
+    def _route_after_intent(
+        state: AgentState,
+    ) -> Literal["plan", "end"]:
+        """
+        根据 Intent 节点的结果，决定下一个节点
+
+        路由逻辑：
+          - is_finished → end
+          - 其他 → plan（Phase 10B 实现 WAITING_USER 暂停）
+        """
+        if state.is_finished:
+            return "end"
+        return "plan"
+
+    @staticmethod
     def _route_after_reflect(
         state: AgentState,
     ) -> Literal["execute", "replan", "end"]:
@@ -742,10 +938,14 @@ class AgentGraph:
                 error_message=str(exc),
             )
         finally:
-            # Phase 6: 清理 SandboxEngine
+            # Phase 6: 清理 SandboxEngine（Phase 10: 根据配置决定是否自动关闭）
             if engine:
-                await engine.cleanup()
-                self._engines.pop(session_id, None)
-                logger.info("[AgentGraph] SandboxEngine 已清理: session=%d", session_id)
+                from app.config import settings
+                if settings.SANDBOX_AUTO_CLOSE:
+                    await engine.cleanup()
+                    self._engines.pop(session_id, None)
+                    logger.info("[AgentGraph] SandboxEngine 已清理: session=%d", session_id)
+                else:
+                    logger.info("[AgentGraph] SandboxEngine 保持活跃 (auto_close=False): session=%d", session_id)
 
             # 注：WS cleanup 由 AgentRuntime.run() 统一处理，此处不重复调用

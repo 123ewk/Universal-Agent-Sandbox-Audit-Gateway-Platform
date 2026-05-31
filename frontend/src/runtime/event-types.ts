@@ -25,12 +25,15 @@ export const EventType = {
   AGENT_STARTED: 'agent.started',
   AGENT_PLANNING: 'agent.planning',
   AGENT_PLAN_COMPLETED: 'agent.plan.completed',
+  AGENT_THOUGHT: 'agent.thought',
   AGENT_STEP_STARTED: 'agent.step.started',
   AGENT_STEP_COMPLETED: 'agent.step.completed',
   AGENT_STEP_FAILED: 'agent.step.failed',
   AGENT_COMPLETED: 'agent.completed',
   AGENT_FAILED: 'agent.failed',
   AGENT_CANCELLED: 'agent.cancelled',
+  AGENT_QUESTION: 'agent.question',
+  AGENT_QUESTION_ANSWERED: 'agent.question.answered',
 
   // sandbox.*
   SANDBOX_NAVIGATION: 'sandbox.navigation',
@@ -119,6 +122,24 @@ export interface PlanStep {
   skill_name: string
   skill_params: Record<string, unknown>
   expected_outcome: string
+  thought?: string
+  reasoning_chain?: string[]
+}
+
+export interface ThoughtPayload {
+  thought: string
+  intent: string
+  confidence: number
+  reasoning_chain: string[]
+  step_number: number
+}
+
+export interface QuestionPayload {
+  question_id: number
+  question_text: string
+  options: string[]
+  context: Record<string, unknown>
+  step_number: number
 }
 
 export type WSPayload = Record<string, unknown>

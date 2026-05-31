@@ -42,12 +42,15 @@ class EventType(str, Enum):
     AGENT_STARTED = "agent.started"
     AGENT_PLANNING = "agent.planning"
     AGENT_PLAN_COMPLETED = "agent.plan.completed"
+    AGENT_THOUGHT = "agent.thought"
     AGENT_STEP_STARTED = "agent.step.started"
     AGENT_STEP_COMPLETED = "agent.step.completed"
     AGENT_STEP_FAILED = "agent.step.failed"
     AGENT_COMPLETED = "agent.completed"
     AGENT_FAILED = "agent.failed"
     AGENT_CANCELLED = "agent.cancelled"
+    AGENT_QUESTION = "agent.question"
+    AGENT_QUESTION_ANSWERED = "agent.question.answered"
 
     # --- sandbox.* ---
     SANDBOX_NAVIGATION = "sandbox.navigation"
@@ -137,6 +140,24 @@ class CostPayload(BaseModel):
     total_steps: int = 0
 
 
+class ThoughtPayload(BaseModel):
+    """Agent 思考过程 Payload"""
+    thought: str = ""
+    intent: str = ""
+    confidence: float = 0.0
+    reasoning_chain: list[str] = Field(default_factory=list)
+    step_number: int = 0
+
+
+class QuestionPayload(BaseModel):
+    """Agent 向人类提问 Payload"""
+    question_id: int
+    question_text: str
+    options: list[str] = Field(default_factory=list)
+    context: dict[str, Any] = Field(default_factory=dict)
+    step_number: int = 0
+
+
 # ====================================================================
 # 统一消息
 # ====================================================================
@@ -208,3 +229,15 @@ def sandbox_screenshot(session_id: int, payload: ScreenshotPayload) -> WSMessage
 
 def sandbox_navigation(session_id: int, payload: NavigationPayload) -> WSMessage:
     return make_message(EventType.SANDBOX_NAVIGATION, session_id, payload)
+
+
+def agent_thought(session_id: int, payload: ThoughtPayload) -> WSMessage:
+    return make_message(EventType.AGENT_THOUGHT, session_id, payload)
+
+
+def agent_question(session_id: int, payload: QuestionPayload) -> WSMessage:
+    return make_message(EventType.AGENT_QUESTION, session_id, payload)
+
+
+def agent_question_answered(session_id: int, payload: dict[str, Any]) -> WSMessage:
+    return make_message(EventType.AGENT_QUESTION_ANSWERED, session_id, payload)

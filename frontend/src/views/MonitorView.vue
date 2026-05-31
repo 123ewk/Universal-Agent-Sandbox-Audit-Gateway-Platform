@@ -1,15 +1,31 @@
 <script setup lang="ts">
 /**
- * MonitorView — Agent 实时监控面板
+ * MonitorView V2 — Agent Runtime OS Dashboard
  *
- * 核心职责：连接 Session 的 WS 事件流 + 展示执行进度
- * 子组件：StepTimeline + BrowserPanel + ApprovalDialog
+ * 布局:
+ *   ┌──────────────────────────────────────────┐
+ *   │  Status Bar: Session ID / Status / Cost  │
+ *   ├────────────────┬─────────────────────────┤
+ *   │  Left Panel    │  Live Browser/Screenshot│
+ *   │  [Tabs]        │                          │
+ *   │  Console       │                          │
+ *   │  Timeline      │                          │
+ *   │  Step Tree     │                          │
+ *   │  Permissions   │                          │
+ *   ├────────────────┴─────────────────────────┤
+ *   │  Artifacts Bar                           │
+ *   └──────────────────────────────────────────┘
  */
-import { onMounted, onUnmounted, inject, computed } from 'vue'
+import { onMounted, inject, computed, ref } from 'vue'
 import { useSessionsStore } from '@/stores/sessions'
 import type { WSClient } from '@/runtime'
-import StepTimeline from '@/components/StepTimeline.vue'
+import StatusBadge from '@/components/StatusBadge.vue'
+import HumanConsole from '@/components/HumanConsole.vue'
+import ThoughtTimeline from '@/components/ThoughtTimeline.vue'
+import StepTree from '@/components/StepTree.vue'
+import ToolPermissionPanel from '@/components/ToolPermissionPanel.vue'
 import BrowserPanel from '@/components/BrowserPanel.vue'
+import ArtifactPanel from '@/components/ArtifactPanel.vue'
 import ApprovalDialog from '@/components/ApprovalDialog.vue'
 
 const props = defineProps<{ id: string }>()
@@ -19,257 +35,205 @@ const sessionsStore = useSessionsStore()
 const wsClient = inject<WSClient>('wsClient')!
 
 const session = computed(() => sessionsStore.sessions.get(sessionId.value) ?? null)
+const activeTab = ref<'console' | 'timeline' | 'steps' | 'permissions'>('console')
 
 onMounted(() => {
-  // 如果还未初始化（直接访问 URL），先初始化
   if (!sessionsStore.sessions.has(sessionId.value)) {
     sessionsStore.initSession(sessionId.value)
   }
   sessionsStore.setActiveSession(sessionId.value)
-
-  // 如果 WS 未连接，建立连接
   if (!wsClient.connected || wsClient.sessionIdValue !== sessionId.value) {
     wsClient.connect(sessionId.value)
   }
 })
-
-onUnmounted(() => {
-  // 离开页面不断开 WS，保持数据接收
-})
-
-// ================================================================
-// Status display helpers
-// ================================================================
-
-const statusClass = computed(() => {
-  const s = session.value
-  if (!s) return ''
-  switch (s.status) {
-    case 'running':
-    case 'planning':
-      return 'badge-running'
-    case 'completed':
-      return 'badge-success'
-    case 'failed':
-      return 'badge-failed'
-    default:
-      return 'badge-pending'
-  }
-})
-
-const statusLabel = computed(() => {
-  const s = session.value
-  if (!s) return 'Unknown'
-  const map: Record<string, string> = {
-    pending: '等待中',
-    planning: '规划中',
-    running: '执行中',
-    completed: '已完成',
-    failed: '失败',
-    cancelled: '已取消',
-  }
-  return map[s.status] ?? s.status
-})
 </script>
 
 <template>
-  <div class="monitor">
-    <!-- Status Bar -->
-    <div class="status-bar">
-      <div class="sb-left">
-        <span class="badge" :class="statusClass">{{ statusLabel }}</span>
-        <span class="sb-task">{{ session?.taskDescription ?? '加载中...' }}</span>
+  <div class="monitor-v2">
+    <!-- ============================================================ -->
+    <!-- Status Bar                                                   -->
+    <!-- ============================================================ -->
+    <div class="mv-statusbar">
+      <div class="mvs-left">
+        <span class="mvs-session">Session #{{ sessionId }}</span>
+        <StatusBadge v-if="session" :status="session.status" />
+        <span class="mvs-cost" v-if="session && session.llmCost !== '0'">
+          ${{ session.llmCost }}
+        </span>
       </div>
-      <div class="sb-right">
-        <span class="sb-metric">
+      <div class="mvs-right">
+        <span class="mvs-metric">
           Step {{ session?.totalStepsExecuted ?? 0 }}/{{ session?.planSteps.length || '?' }}
         </span>
-        <span class="sb-metric">{{ session?.progressPct ?? 0 }}%</span>
-        <span class="sb-metric" v-if="session?.currentUrl">
+        <span class="mvs-metric">{{ session?.progressPct ?? 0 }}%</span>
+        <span class="mvs-metric" v-if="session?.currentUrl" :title="session.currentUrl">
           {{ session.currentUrl }}
         </span>
       </div>
     </div>
 
-    <div v-if="!session" class="monitor-empty">
+    <!-- ============================================================ -->
+    <!-- Progress Bar                                                 -->
+    <!-- ============================================================ -->
+    <div class="mv-progress">
+      <div
+        class="mv-progress-fill"
+        :class="{ 'mv-error': session?.status === 'failed' }"
+        :style="{ width: (session?.progressPct ?? 0) + '%' }"
+      />
+    </div>
+
+    <!-- ============================================================ -->
+    <!-- Main Content                                                 -->
+    <!-- ============================================================ -->
+    <div class="mv-main" v-if="session">
+      <!-- Left Panel (Tabs) -->
+      <div class="mv-left">
+        <div class="mv-tabs">
+          <button class="mv-tab" :class="{ active: activeTab === 'console' }" @click="activeTab = 'console'">Console</button>
+          <button class="mv-tab" :class="{ active: activeTab === 'timeline' }" @click="activeTab = 'timeline'">Timeline</button>
+          <button class="mv-tab" :class="{ active: activeTab === 'steps' }" @click="activeTab = 'steps'">Steps</button>
+          <button class="mv-tab" :class="{ active: activeTab === 'permissions' }" @click="activeTab = 'permissions'">Permissions</button>
+        </div>
+        <div class="mv-tab-content">
+          <HumanConsole v-if="activeTab === 'console'" />
+          <ThoughtTimeline v-else-if="activeTab === 'timeline'" />
+          <StepTree v-else-if="activeTab === 'steps'" />
+          <ToolPermissionPanel v-else-if="activeTab === 'permissions'" />
+        </div>
+      </div>
+
+      <!-- Right Panel (Browser + Error + Cost) -->
+      <div class="mv-right">
+        <BrowserPanel :session-id="sessionId" />
+
+        <!-- Error -->
+        <div v-if="session.errorMessage" class="card mv-error-card">
+          <h4>错误信息</h4>
+          <pre>{{ session.errorMessage }}</pre>
+        </div>
+
+        <!-- Cost Summary -->
+        <div v-if="session.status === 'completed' || session.status === 'failed'" class="card mv-cost-card">
+          <h4>执行摘要</h4>
+          <div class="mv-cost-row"><span>LLM 费用</span><span>${{ session.llmCost }}</span></div>
+          <div class="mv-cost-row"><span>总步数</span><span>{{ session.totalStepsExecuted }}</span></div>
+          <div class="mv-cost-row"><span>Tokens</span><span>{{ session.tokensUsed.toLocaleString() }}</span></div>
+        </div>
+      </div>
+
+      <!-- ApprovalDialog (teleported overlay) -->
+      <ApprovalDialog />
+    </div>
+
+    <!-- Loading -->
+    <div class="mv-empty" v-else>
       加载 Session 状态...
     </div>
 
-    <template v-else>
-      <!-- Progress Bar -->
-      <div class="progress-bar">
-        <div
-          class="progress-fill"
-          :class="{ 'is-error': session.status === 'failed' }"
-          :style="{ width: session.progressPct + '%' }"
-        />
-      </div>
-
-      <!-- Main Content -->
-      <div class="monitor-main">
-        <StepTimeline :session-id="sessionId" />
-
-        <!-- Side Panel -->
-        <aside class="monitor-side">
-          <!-- Browser Panel (URL bar + screenshot) -->
-          <BrowserPanel :session-id="sessionId" />
-
-          <!-- Error -->
-          <div v-if="session.errorMessage" class="card error-card">
-            <h4>错误信息</h4>
-            <pre>{{ session.errorMessage }}</pre>
-          </div>
-
-          <!-- Cost Summary -->
-          <div v-if="session.status === 'completed' || session.status === 'failed'" class="card cost-card">
-            <h4>执行摘要</h4>
-            <div class="cc-row">
-              <span>LLM 费用</span>
-              <span>${{ session.llmCost }}</span>
-            </div>
-            <div class="cc-row">
-              <span>总步数</span>
-              <span>{{ session.totalStepsExecuted }}</span>
-            </div>
-            <div class="cc-row">
-              <span>Tokens</span>
-              <span>{{ session.tokensUsed.toLocaleString() }}</span>
-            </div>
-          </div>
-        </aside>
-
-        <!-- Approval Dialog (shown over everything when pending) -->
-        <ApprovalDialog />
-      </div>
-    </template>
+    <!-- ============================================================ -->
+    <!-- Artifacts Bar (bottom)                                       -->
+    <!-- ============================================================ -->
+    <div class="mv-artifacts-bar" v-if="session">
+      <ArtifactPanel />
+    </div>
   </div>
 </template>
 
 <style scoped>
-.monitor {
+.monitor-v2 {
   display: flex;
   flex-direction: column;
-  height: calc(100vh - 45px); /* subtract header height */
+  height: calc(100vh - 45px);
 }
 
 /* Status Bar */
-
-.status-bar {
+.mv-statusbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 10px 20px;
+  padding: 8px 20px;
   background: var(--bg-secondary);
   border-bottom: 1px solid var(--border);
+  min-height: 40px;
 }
+.mvs-left { display: flex; align-items: center; gap: 10px; }
+.mvs-session { font-size: 13px; font-weight: 600; color: var(--text-primary); }
+.mvs-cost { font-size: 12px; font-family: var(--font-mono); color: var(--success); }
+.mvs-right { display: flex; align-items: center; gap: 14px; }
+.mvs-metric { font-size: 11px; color: var(--text-secondary); font-family: var(--font-mono); max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-.sb-left {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
+/* Progress */
+.mv-progress { height: 2px; background: var(--border); }
+.mv-progress-fill { height: 100%; background: var(--accent); transition: width .3s; }
+.mv-progress-fill.mv-error { background: var(--danger); }
 
-.sb-task {
-  font-size: 14px;
-  font-weight: 500;
-  max-width: 480px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.sb-right {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-}
-
-.sb-metric {
-  font-size: 12px;
-  color: var(--text-secondary);
-  font-family: var(--font-mono);
-  max-width: 300px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.sb-metric:last-child {
-  color: var(--accent);
-}
-
-/* Progress Bar */
-
-.progress-bar {
-  height: 3px;
-  background: var(--border);
-}
-
-.progress-fill {
-  height: 100%;
-  background: var(--accent);
-  transition: width .3s ease;
-}
-
-.progress-fill.is-error {
-  background: var(--danger);
-}
-
-/* Main Content */
-
-.monitor-main {
+/* Main */
+.mv-main {
   flex: 1;
   display: flex;
   overflow: hidden;
 }
 
-.monitor-side {
-  width: 360px;
-  padding: 16px;
-  border-left: 1px solid var(--border);
-  overflow-y: auto;
+/* Left Panel */
+.mv-left {
+  flex: 1;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  min-width: 0;
+  border-right: 1px solid var(--border);
 }
-
-.monitor-empty {
-  flex: 1;
+.mv-tabs {
   display: flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--text-secondary);
+  border-bottom: 1px solid var(--border);
+  padding: 0 12px;
+  background: var(--bg-secondary);
 }
-
-/* Side Cards */
-
-.error-card h4,
-.cost-card h4 {
+.mv-tab {
+  padding: 8px 14px;
   font-size: 11px;
-  font-weight: 600;
+  font-weight: 500;
+  border: none;
+  background: none;
   color: var(--text-secondary);
-  text-transform: uppercase;
-  letter-spacing: .5px;
-  margin-bottom: 8px;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  transition: color .15s, border-color .15s;
+}
+.mv-tab:hover { color: var(--text-primary); }
+.mv-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+.mv-tab-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px;
 }
 
-.error-card pre {
-  font-size: 12px;
-  font-family: var(--font-mono);
-  color: var(--danger);
-  white-space: pre-wrap;
-}
-
-.cost-card .cc-row {
+/* Right Panel */
+.mv-right {
+  width: 380px;
   display: flex;
-  justify-content: space-between;
-  padding: 4px 0;
-  font-size: 12px;
-  font-family: var(--font-mono);
-  color: var(--text-primary);
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  overflow-y: auto;
 }
+.mv-error-card { }
+.mv-error-card h4 { font-size: 10px; font-weight: 600; color: var(--text-secondary); text-transform: uppercase; margin-bottom: 6px; }
+.mv-error-card pre { font-size: 11px; color: var(--danger); white-space: pre-wrap; font-family: var(--font-mono); }
+.mv-cost-card h4 { font-size: 10px; font-weight: 600; color: var(--text-secondary); text-transform: uppercase; margin-bottom: 6px; }
+.mv-cost-row { display: flex; justify-content: space-between; padding: 3px 0; font-size: 11px; font-family: var(--font-mono); }
+.mv-cost-row span:first-child { color: var(--text-secondary); }
 
-.cost-card .cc-row span:first-child {
-  color: var(--text-secondary);
+/* Empty */
+.mv-empty { flex: 1; display: flex; align-items: center; justify-content: center; color: var(--text-secondary); }
+
+/* Artifacts Bar */
+.mv-artifacts-bar {
+  border-top: 1px solid var(--border);
+  padding: 10px 20px;
+  background: var(--bg-secondary);
+  max-height: 140px;
+  overflow-y: auto;
 }
 </style>

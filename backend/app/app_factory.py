@@ -97,12 +97,19 @@ def create_app() -> FastAPI:
     from app.audit.router import router as audit_router
 
     app.include_router(agent_router, prefix="/api/v1")
-    # audit_router 自带 /api/v1/approvals 前缀
+    # audit_router 自带 /api/v1/approvals 前缀 + question_router 自带 /api/v1/questions
     app.include_router(audit_router)
+
+    from app.audit.router import question_router
+    app.include_router(question_router)
 
     # Screenshot router
     from app.routers.screenshots import router as screenshot_router
     app.include_router(screenshot_router)
+
+    # Artifact router
+    from app.routers.artifacts import router as artifact_router
+    app.include_router(artifact_router)
 
     # ================================================================
     # 4. Lifecycle

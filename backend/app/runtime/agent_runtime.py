@@ -103,6 +103,10 @@ class AgentRuntime:
             ws_manager=wsm,
         )
 
+        # Phase 10: 注入 QuestionManager 以支持 Agent 暂停提问
+        from app.audit.question_manager import get_question_manager
+        graph.question_manager = get_question_manager()
+
         try:
             state = await graph.invoke(
                 task_description=task_description,

@@ -48,7 +48,22 @@ class PromptBuilder:
         return _SYSTEM_PROMPTS.get(self.provider, _SYSTEM_PROMPTS["deepseek"])
 
     # ================================================================
-    # Plan Prompt — LLM 拆解任务为步骤
+    # Intent Prompt — LLM 分析用户意图
+    # ================================================================
+
+    def build_intent_prompt(self, task_description: str) -> str:
+        """
+        构建 Intent 分析阶段的 Prompt
+
+        要求 LLM 先分析用户意图，输出结构化意图结果，
+        识别是否需要向用户提问澄清歧义。
+        """
+        return _INTENT_TEMPLATES.get(self.provider, _INTENT_TEMPLATES["deepseek"]).format(
+            task=task_description,
+        )
+
+    # ================================================================
+    # Plan Prompt — LLM 拆解任务为步骤（含 thought/reasoning）
     # ================================================================
 
     def build_plan_prompt(
@@ -61,15 +76,25 @@ class PromptBuilder:
         构建 Plan 阶段的 Prompt
 
         要求 LLM 将用户任务拆解为具体的 Skill 调用步骤，
-        返回结构化 JSON。
+        每个步骤必须包含 thought/reasoning 字段。
         """
         tools_desc = self._format_tools_for_plan(selector)
         history_context = self._format_history_for_plan(state)
+        intent_context = ""
+        if state.intent_result:
+            intent = state.intent_result
+            intent_context = (
+                f"\n## 意图分析结果\n"
+                f"意图: {intent.intent_category} (置信度: {intent.confidence:.0%})\n"
+                f"建议工具: {', '.join(intent.suggested_tools) if intent.suggested_tools else '无'}\n"
+                f"推理: {intent.reasoning}\n"
+            )
 
         return _PLAN_TEMPLATES[self.provider].format(
             task=task_description,
             tools=tools_desc,
             history=history_context,
+            intent=intent_context,
         )
 
     # ================================================================
@@ -221,21 +246,106 @@ _SYSTEM_PROMPTS: dict[str, str] = {
 
 
 # ====================================================================
+# Intent Prompt 模板
+# ====================================================================
+
+_INTENT_TEMPLATES: dict[str, str] = {
+    "deepseek": (
+        "你是一个任务意图分析器。分析用户的任务，输出结构化的意图分类结果。\n\n"
+        "## 用户任务\n{task}\n\n"
+        "## 意图分类\n"
+        "从以下类别中选择最匹配的：\n"
+        "- WEB_SEARCH: 需要浏览器搜索/访问网页\n"
+        "- LOCAL_APP_LOOKUP: 查找本地安装的应用/文件\n"
+        "- FILE_OPERATION: 文件读写/移动/删除操作\n"
+        "- SYSTEM_INFO: 获取系统信息\n"
+        "- GENERAL_QA: 通用问答/无需工具\n\n"
+        "## 要求\n"
+        "1. 如果任务有歧义（如可能指本地或网页），必须生成 clarifying_questions\n"
+        "2. 如果任务明确，closing_questions 留空\n"
+        "3. suggested_tools 列出你可能需要用到的工具\n"
+        "4. reasoning_chain 列出推理步骤\n\n"
+        "## 输出格式\n"
+        "只输出 JSON：\n"
+        "{{\n"
+        '  "intent_category": "WEB_SEARCH",\n'
+        '  "confidence": 0.9,\n'
+        '  "clarifying_questions": [{{"question": "你指的是本地飞书还是网页飞书？", "options": ["本地应用", "网页版"]}}],\n'
+        '  "suggested_tools": ["browser_goto", "desktop_search"],\n'
+        '  "reasoning": "用户提到飞书，可能是本地应用或网页版",\n'
+        '  "reasoning_chain": ["分析任务关键词: 飞书", "判断可能意图: 本地或网页", "建议两个方向"]\n'
+        "}}\n"
+        "只输出 JSON，不要输出其他内容。"
+    ),
+    "openai": (
+        "You are a task intent analyzer. Analyze the user's task and output structured intent.\n\n"
+        "## Task\n{task}\n\n"
+        "## Intent categories\n"
+        "- WEB_SEARCH: Browser search / web access needed\n"
+        "- LOCAL_APP_LOOKUP: Look up locally installed apps/files\n"
+        "- FILE_OPERATION: File read/write/move/delete\n"
+        "- SYSTEM_INFO: System information query\n"
+        "- GENERAL_QA: General Q&A, no tools needed\n\n"
+        "## Rules\n"
+        "1. If the task is ambiguous, generate clarifying_questions\n"
+        "2. If clear, leave clarifying_questions empty\n"
+        "3. Suggest tools in suggested_tools\n"
+        "4. List reasoning steps in reasoning_chain\n\n"
+        "## Output (JSON only)\n"
+        "{{\n"
+        '  "intent_category": "WEB_SEARCH",\n'
+        '  "confidence": 0.9,\n'
+        '  "clarifying_questions": [],\n'
+        '  "suggested_tools": ["browser_goto"],\n'
+        '  "reasoning": "...",\n'
+        '  "reasoning_chain": ["..."]\n'
+        "}}"
+    ),
+    "claude": (
+        "You are a task intent analyzer. Analyze the user's task and output structured intent.\n\n"
+        "## Task\n{task}\n\n"
+        "## Intent categories\n"
+        "- WEB_SEARCH: Browser search / web access\n"
+        "- LOCAL_APP_LOOKUP: Local app/file lookup\n"
+        "- FILE_OPERATION: File operations\n"
+        "- SYSTEM_INFO: System info\n"
+        "- GENERAL_QA: No tools needed\n\n"
+        "## Rules\n"
+        "1. Ambiguous tasks → generate clarifying_questions\n"
+        "2. Clear tasks → leave clarifying_questions empty\n"
+        "3. Include suggested_tools and reasoning_chain\n\n"
+        "## Output (JSON only)\n"
+        "{{\n"
+        '  "intent_category": "WEB_SEARCH",\n'
+        '  "confidence": 0.9,\n'
+        '  "clarifying_questions": [],\n'
+        '  "suggested_tools": ["browser_goto"],\n'
+        '  "reasoning": "...",\n'
+        '  "reasoning_chain": ["..."]\n'
+        "}}"
+    ),
+}
+
+
+# ====================================================================
 # Plan Prompt 模板
 # ====================================================================
 
 _PLAN_TEMPLATES: dict[str, str] = {
     "deepseek": (
-        "你是一个任务规划器。请将用户的任务分解为具体的执行步骤。\n\n"
+        "你是一个任务规划器。请将用户的任务分解为具体的执行步骤，"
+        "每步都要展示你的思考过程。\n\n"
         "## 用户任务\n{task}\n\n"
         "## 可用工具\n{tools}\n\n"
-        "## 历史上下文\n{history}\n\n"
+        "## 历史上下文\n{history}\n"
+        "{intent}\n"
         "## 规划规则\n"
         "1. 每个步骤必须使用一个具体的 Tool\n"
         "2. 步骤之间的数据依赖要明确（前一步的输出可能是后一步的输入）\n"
         "3. 按 Tool 的 Tier 分级规划：先 CORE（导航/截图），再 INTERACTION（点击/输入），"
         "需要时再 FILE/SHELL\n"
-        "4. 预计总步数不要超过 10 步\n\n"
+        "4. 预计总步数不要超过 10 步\n"
+        "5. 每步必须包含 thought（你在想什么）和 reasoning_chain（推理链路）\n\n"
         "## 输出格式\n"
         "请以 JSON 数组格式输出执行计划：\n"
         '[\n'
@@ -245,7 +355,9 @@ _PLAN_TEMPLATES: dict[str, str] = {
         '    "skill_name": "browser_goto",\n'
         '    "skill_params": {{"url": "https://..."}},\n'
         '    "expected_outcome": "预期结果",\n'
-        '    "required_tier": "CORE"\n'
+        '    "required_tier": "CORE",\n'
+        '    "thought": "我认为首先需要...",\n'
+        '    "reasoning_chain": ["分析: 需要访问网页", "决策: 使用 browser_goto", "理由: 导航到目标网站"]\n'
         '  }}\n'
         ']\n\n'
         "只输出 JSON 数组，不要输出其他内容。"
@@ -254,12 +366,14 @@ _PLAN_TEMPLATES: dict[str, str] = {
         "You are a task planner. Decompose the user's task into concrete execution steps.\n\n"
         "## Task\n{task}\n\n"
         "## Available Tools\n{tools}\n\n"
-        "## History\n{history}\n\n"
+        "## History\n{history}\n"
+        "{intent}\n"
         "## Rules\n"
         "1. Each step must use exactly one Tool\n"
         "2. Plan in Tier order: CORE (navigate/screenshot) → INTERACTION (click/type) "
         "→ FILE/SHELL only when needed\n"
-        "3. Maximum 10 steps\n\n"
+        "3. Maximum 10 steps\n"
+        "4. Every step must include thought and reasoning_chain\n\n"
         "## Output\n"
         "Output a JSON array of steps:\n"
         '[\n'
@@ -269,7 +383,9 @@ _PLAN_TEMPLATES: dict[str, str] = {
         '    "skill_name": "browser_goto",\n'
         '    "skill_params": {{"url": "https://..."}},\n'
         '    "expected_outcome": "...",\n'
-        '    "required_tier": "CORE"\n'
+        '    "required_tier": "CORE",\n'
+        '    "thought": "...",\n'
+        '    "reasoning_chain": ["..."]\n'
         '  }}\n'
         ']\n'
         "Output only the JSON array, nothing else."
@@ -278,11 +394,13 @@ _PLAN_TEMPLATES: dict[str, str] = {
         "You are a task planner. Decompose the user's task into concrete execution steps.\n\n"
         "## Task\n{task}\n\n"
         "## Available Tools\n{tools}\n\n"
-        "## History\n{history}\n\n"
+        "## History\n{history}\n"
+        "{intent}\n"
         "## Rules\n"
         "1. Each step uses exactly one Tool\n"
         "2. Tier order: CORE → INTERACTION → FILE/SHELL (only when necessary)\n"
-        "3. Maximum 10 steps\n\n"
+        "3. Maximum 10 steps\n"
+        "4. Every step must include thought and reasoning_chain\n\n"
         "## Output format\n"
         "JSON array only:\n"
         '[\n'
@@ -292,7 +410,9 @@ _PLAN_TEMPLATES: dict[str, str] = {
         '    "skill_name": "browser_goto",\n'
         '    "skill_params": {{"url": "https://..."}},\n'
         '    "expected_outcome": "...",\n'
-        '    "required_tier": "CORE"\n'
+        '    "required_tier": "CORE",\n'
+        '    "thought": "...",\n'
+        '    "reasoning_chain": ["..."]\n'
         '  }}\n'
         ']\n'
         "Output only the JSON array."

@@ -146,3 +146,104 @@ async def deny(approval_id: int, body: DenyRequest = DenyRequest()) -> ApprovalA
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+
+# ====================================================================
+# Question API — Agent 向人类提问端点（独立 router）
+# ====================================================================
+
+from app.audit.question_manager import get_question_manager
+
+question_router = APIRouter(prefix="/api/v1/questions", tags=["Question"])
+
+
+class AnswerRequest(BaseModel):
+    """回答请求"""
+    answer_text: str = Field(..., min_length=1, description="用户的回答")
+
+
+class QuestionItem(BaseModel):
+    """问题列表项"""
+    question_id: int
+    session_id: int
+    question_text: str
+    options: list[str] = Field(default_factory=list)
+    step_number: int = 0
+    status: str
+    created_at: str
+    expires_at: Optional[str] = None
+
+
+@question_router.get("/pending")
+async def list_pending_questions(
+    session_id: Optional[int] = Query(default=None, description="按 Session 过滤"),
+):
+    """列出所有待回答的问题"""
+    mgr = get_question_manager()
+    pending = mgr.get_pending(session_id=session_id)
+    return {
+        "count": len(pending),
+        "items": [
+            QuestionItem(
+                question_id=q.id,
+                session_id=q.session_id,
+                question_text=q.question_text,
+                options=q.options,
+                step_number=q.step_number,
+                status=q.status,
+                created_at=q.created_at.isoformat(),
+                expires_at=q.expires_at.isoformat() if q.expires_at else None,
+            )
+            for q in pending
+        ],
+    }
+
+
+@question_router.get("/pending/{question_id}")
+async def get_question_detail(question_id: int):
+    """查看单个问题详情"""
+    mgr = get_question_manager()
+    q = mgr.get_question(question_id)
+    if q is None:
+        raise HTTPException(status_code=404, detail=f"问题不存在: {question_id}")
+    return QuestionItem(
+        question_id=q.id,
+        session_id=q.session_id,
+        question_text=q.question_text,
+        options=q.options,
+        step_number=q.step_number,
+        status=q.status,
+        created_at=q.created_at.isoformat(),
+        expires_at=q.expires_at.isoformat() if q.expires_at else None,
+    )
+
+
+@question_router.post("/{question_id}/answer")
+async def answer_question(question_id: int, body: AnswerRequest):
+    """回答 Agent 的问题"""
+    mgr = get_question_manager()
+    try:
+        q = await mgr.answer(question_id, body.answer_text)
+        return {
+            "question_id": question_id,
+            "status": q.status,
+            "answer": q.answer,
+            "message": "已回答",
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@question_router.post("/{question_id}/skip")
+async def skip_question(question_id: int):
+    """跳过问题（不回答）"""
+    mgr = get_question_manager()
+    try:
+        q = await mgr.skip(question_id)
+        return {
+            "question_id": question_id,
+            "status": q.status,
+            "message": "已跳过",
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))

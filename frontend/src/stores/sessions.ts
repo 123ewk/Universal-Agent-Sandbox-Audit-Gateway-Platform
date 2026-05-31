@@ -15,6 +15,7 @@ import type {
   ScreenshotPayload,
   PageInfoPayload,
   CostPayload,
+  ThoughtPayload,
 } from '@/runtime/event-types'
 
 // ====================================================================
@@ -53,6 +54,7 @@ export interface SessionState {
   currentUrl: string
   pageTitle: string
   createdAt: string | null
+  thoughtHistory: ThoughtPayload[]
 }
 
 function createEmptyState(sessionId: number): SessionState {
@@ -73,6 +75,7 @@ function createEmptyState(sessionId: number): SessionState {
     currentUrl: '',
     pageTitle: '',
     createdAt: null,
+    thoughtHistory: [],
   }
 }
 
@@ -257,6 +260,12 @@ export const useSessionsStore = defineStore('sessions', () => {
     if (s && seq > s.lastSeq) s.lastSeq = seq
   }
 
+  function appendThought(sessionId: number, payload: ThoughtPayload): void {
+    const s = sessions.value.get(sessionId)
+    if (!s) return
+    s.thoughtHistory.push(payload)
+  }
+
   return {
     // state
     sessions,
@@ -280,5 +289,6 @@ export const useSessionsStore = defineStore('sessions', () => {
     addScreenshot,
     setPageInfo,
     updateLastSeq,
+    appendThought,
   }
 })

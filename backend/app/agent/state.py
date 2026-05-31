@@ -35,11 +35,13 @@ from pydantic import BaseModel, Field, PrivateAttr, field_validator
 class AgentStatus(str, Enum):
     """Agent 执行状态"""
     IDLE = "idle"              # 初始状态，等待开始
+    ANALYZING = "analyzing"    # 正在分析意图（Intent Analyzer）
     PLANNING = "planning"      # LLM 正在拆解任务
     EXECUTING = "executing"    # 正在执行步骤
     OBSERVING = "observing"    # 正在处理观察结果
     REFLECTING = "reflecting"  # LLM 正在评估执行结果
     WAITING_APPROVAL = "waiting_approval"  # 等待人类审批
+    WAITING_USER = "waiting_user"          # 等待人类回答提问（歧义澄清）
     COMPLETED = "completed"    # 任务执行成功
     FAILED = "failed"          # 任务执行失败
     CANCELLED = "cancelled"    # 用户手动取消
@@ -69,10 +71,81 @@ class PlanStep(BaseModel):
     skill_params: dict[str, Any] = Field(default_factory=dict, description="Skill 参数")
     expected_outcome: str = Field(default="", description="预期结果描述")
 
+    # 思考过程（Agent 透明化核心字段）
+    thought: str = Field(default="", description="Agent 在本步骤前的思考过程（自然语言）")
+    reasoning_chain: list[str] = Field(default_factory=list, description="推理链路，每步一个字符串")
+
     # 检查点：该步骤是否需要人类审批才能继续
     requires_approval: bool = Field(default=False, description="是否需要人类审批")
     # 该步骤解锁的 Tier（如步骤涉及点击则解锁 INTERACTION）
     required_tier: Optional[str] = Field(default=None, description="执行此步骤需要解锁的 Tier")
+
+
+# ====================================================================
+# IntentResult — 意图分析结果
+# ====================================================================
+
+
+class IntentResult(BaseModel):
+    """
+    Intent Analyzer 节点输出的意图分析结果
+
+    LLM 分析用户任务，输出结构化意图：
+      - intent_category: WEB_SEARCH / LOCAL_APP_LOOKUP / FILE_OPERATION / GENERAL_QA / ...
+      - confidence: 置信度
+      - clarifying_questions: 如果有歧义，Agent 向用户提问
+      - suggested_tools: 建议的工具列表（供后续 Plan 使用）
+      - reasoning: 推理过程
+    """
+    intent_category: str = Field(
+        default="GENERAL_QA",
+        description="意图分类: WEB_SEARCH / LOCAL_APP_LOOKUP / FILE_OPERATION / SYSTEM_INFO / GENERAL_QA",
+    )
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0, description="意图置信度")
+    clarifying_questions: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="需要用户澄清的问题 [{question, options}]",
+    )
+    suggested_tools: list[str] = Field(
+        default_factory=list,
+        description="建议使用的工具名称列表",
+    )
+    reasoning: str = Field(default="", description="意图推理过程（自然语言）")
+    reasoning_chain: list[str] = Field(
+        default_factory=list,
+        description="推理链路，每步一个字符串",
+    )
+
+    @property
+    def has_questions(self) -> bool:
+        """是否需要用户澄清"""
+        return len(self.clarifying_questions) > 0
+
+
+# ====================================================================
+# ActionProposal — Agent 执行提案
+# ====================================================================
+
+
+class ActionProposal(BaseModel):
+    """
+    Agent 在执行前输出的 Action Proposal
+
+    与 PlanStep 不同——PlanStep 是执行计划中的步骤定义，
+    ActionProposal 是每一步执行前 Agent 输出的"思考 + 行动方案"。
+
+    Agent 不直接调 Skill，而是输出 ActionProposal，
+    由 Runtime 审查（RiskEngine + AuditGateway）后再执行。
+    """
+    thought: str = Field(default="", description="Agent 当前在想什么（自然语言）")
+    intent: str = Field(default="", description="识别到的子意图")
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0, description="本步置信度")
+    proposed_action: str = Field(default="", description="建议调用的 Skill 名称")
+    action_params: dict[str, Any] = Field(default_factory=dict, description="Skill 参数")
+    expected_outcome: str = Field(default="", description="预期执行结果")
+    alternative_actions: list[str] = Field(default_factory=list, description="备选方案（Skill 名称列表）")
+    requires_permission: bool = Field(default=False, description="是否认为需要人类授权")
+    reasoning_chain: list[str] = Field(default_factory=list, description="推理链路，每步一个字符串")
 
 
 # ====================================================================
@@ -184,6 +257,17 @@ class AgentState(BaseModel):
     task_description: str = Field(default="", description="用户原始任务描述")
     agent_status: AgentStatus = Field(default=AgentStatus.IDLE)
 
+    # ---- Intent ----
+    intent_result: Optional[IntentResult] = Field(
+        default=None,
+        description="Intent Analyzer 的分析结果",
+    )
+    # 当 WAITING_USER 时，Agent 向用户提出的问题
+    current_question: Optional[dict[str, Any]] = Field(
+        default=None,
+        description="Agent 当前向用户提出的问题",
+    )
+
     # ---- Plan ----
     plan_steps: list[PlanStep] = Field(default_factory=list, description="LLM 生成的执行计划")
     current_step_index: int = Field(default=0, description="当前执行到第几步（0-indexed）")
@@ -287,12 +371,14 @@ class AgentState(BaseModel):
     def transition_to(self, status: AgentStatus) -> None:
         """状态转换（仅用于日志追踪，不影响 LangGraph 状态机）"""
         valid_transitions = {
-            AgentStatus.IDLE: {AgentStatus.PLANNING, AgentStatus.FAILED},
+            AgentStatus.IDLE: {AgentStatus.ANALYZING, AgentStatus.PLANNING, AgentStatus.FAILED},
+            AgentStatus.ANALYZING: {AgentStatus.PLANNING, AgentStatus.WAITING_USER, AgentStatus.FAILED},
             AgentStatus.PLANNING: {AgentStatus.EXECUTING, AgentStatus.FAILED},
-            AgentStatus.EXECUTING: {AgentStatus.OBSERVING, AgentStatus.WAITING_APPROVAL, AgentStatus.FAILED},
+            AgentStatus.EXECUTING: {AgentStatus.OBSERVING, AgentStatus.WAITING_APPROVAL, AgentStatus.WAITING_USER, AgentStatus.FAILED},
             AgentStatus.OBSERVING: {AgentStatus.REFLECTING, AgentStatus.EXECUTING, AgentStatus.PLANNING},
             AgentStatus.REFLECTING: {AgentStatus.EXECUTING, AgentStatus.COMPLETED, AgentStatus.FAILED, AgentStatus.PLANNING},
             AgentStatus.WAITING_APPROVAL: {AgentStatus.EXECUTING, AgentStatus.CANCELLED},
+            AgentStatus.WAITING_USER: {AgentStatus.EXECUTING, AgentStatus.PLANNING, AgentStatus.CANCELLED},
         }
         allowed = valid_transitions.get(self.agent_status, set())
         if status not in allowed and self.agent_status != status:

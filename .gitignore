@@ -14,9 +14,14 @@ venv/
 .env
 *.env.local
 
+# Claude Code (local config, not for sharing)
+.claude/
+backend/.claude/
+
 # Data
 data/screenshots/*
 !data/screenshots/.gitkeep
+backend/data/
 
 # OS
 .DS_Store
