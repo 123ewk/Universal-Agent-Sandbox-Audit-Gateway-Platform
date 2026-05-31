@@ -32,6 +32,7 @@ export const EventType = {
   AGENT_COMPLETED: 'agent.completed',
   AGENT_FAILED: 'agent.failed',
   AGENT_CANCELLED: 'agent.cancelled',
+  AGENT_METRICS: 'agent.metrics',
   AGENT_QUESTION: 'agent.question',
   AGENT_QUESTION_ANSWERED: 'agent.question.answered',
 
@@ -116,6 +117,19 @@ export interface CostPayload {
   total_steps: number
 }
 
+export interface MetricsPayload {
+  model_name: string
+  prompt_tokens: number
+  completion_tokens: number
+  total_tokens: number
+  latency_ms: number
+  estimated_cost: string
+  step_number: number
+  cumulative_cost: string
+  cumulative_tokens: number
+  progress_pct: number
+}
+
 export interface PlanStep {
   step_number: number
   description: string
@@ -140,6 +154,27 @@ export interface QuestionPayload {
   options: string[]
   context: Record<string, unknown>
   step_number: number
+}
+
+export interface StepSummary {
+  step: number
+  skill: string
+  success: boolean
+  time_ms: number
+  tokens: number
+  cost: string
+}
+
+export interface TaskResultPayload {
+  summary: string
+  final_answer: string
+  artifacts: Array<Record<string, unknown>>
+  steps: StepSummary[]
+  browser_active: boolean
+  extracted_data: Record<string, unknown>
+  total_cost: string
+  total_tokens: number
+  total_steps: number
 }
 
 export type WSPayload = Record<string, unknown>

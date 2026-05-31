@@ -77,7 +77,7 @@ class Settings(BaseSettings):
     SANDBOX_TIMEOUT_SECONDS: int = 30      # 单次浏览器操作超时时间
     SANDBOX_MAX_TABS: int = 5              # 最大并发浏览器上下文数
     SANDBOX_USER_DATA_DIR: str = "./data/browser_profiles"  # 浏览器用户数据目录
-    SANDBOX_AUTO_CLOSE: bool = True        # Session 结束后是否自动关闭浏览器
+    SANDBOX_AUTO_CLOSE: bool = False       # Session 结束后是否自动关闭浏览器（False=保持活跃）
 
     # ==================== 安全策略 ====================
     URL_BLOCKLIST: list[str] = [

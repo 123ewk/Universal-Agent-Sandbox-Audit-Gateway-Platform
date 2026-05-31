@@ -19,6 +19,7 @@ Agent 状态模型 — LangGraph 共享状态定义
   from app.agent.state import AgentState, StepRecord, AgentStatus
   graph = StateGraph(AgentState)
 """
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 from enum import Enum
@@ -149,6 +150,22 @@ class ActionProposal(BaseModel):
 
 
 # ====================================================================
+# LLMUsage — LLM 调用指标
+# ====================================================================
+
+
+@dataclass
+class LLMUsage:
+    """单次 LLM 调用的完整指标"""
+    model_name: str = ""
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    latency_ms: int = 0
+    estimated_cost: Decimal = Decimal("0")
+
+
+# ====================================================================
 # StepRecord — 已执行步骤的完整记录
 # ====================================================================
 
@@ -173,6 +190,8 @@ class StepRecord(BaseModel):
     finished_at: Optional[datetime] = Field(default=None)
     execution_time_ms: int = Field(default=0, description="执行耗时（毫秒）")
     llm_cost: Decimal = Field(default=Decimal("0"), description="本步骤 LLM 调用费用")
+    tokens_used: int = Field(default=0, description="本步骤 Token 消耗")
+    llm_usage: Optional[LLMUsage] = Field(default=None, description="LLM 调用完整指标")
 
     # 观察（执行后从页面/环境捕获的结构化信息）
     observation_raw: Optional[str] = Field(default=None, description="原始观察数据摘要")
@@ -393,6 +412,7 @@ class AgentState(BaseModel):
         self.execution_history.append(record)
         self.total_steps_executed = len(self.execution_history)
         self.total_llm_cost += record.llm_cost
+        self.total_tokens_used += record.tokens_used
 
     def add_cost(self, cost: Decimal, tokens: int = 0) -> None:
         """累加 LLM 费用和 Token 消耗"""

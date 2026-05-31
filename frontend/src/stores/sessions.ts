@@ -16,6 +16,8 @@ import type {
   PageInfoPayload,
   CostPayload,
   ThoughtPayload,
+  MetricsPayload,
+  TaskResultPayload,
 } from '@/runtime/event-types'
 
 // ====================================================================
@@ -55,6 +57,8 @@ export interface SessionState {
   pageTitle: string
   createdAt: string | null
   thoughtHistory: ThoughtPayload[]
+  metrics: MetricsPayload | null
+  taskResult: TaskResultPayload | null
 }
 
 function createEmptyState(sessionId: number): SessionState {
@@ -76,6 +80,8 @@ function createEmptyState(sessionId: number): SessionState {
     pageTitle: '',
     createdAt: null,
     thoughtHistory: [],
+    metrics: null,
+    taskResult: null,
   }
 }
 
@@ -266,6 +272,21 @@ export const useSessionsStore = defineStore('sessions', () => {
     s.thoughtHistory.push(payload)
   }
 
+  function updateMetrics(sessionId: number, payload: MetricsPayload): void {
+    const s = sessions.value.get(sessionId)
+    if (!s) return
+    s.metrics = payload
+    s.llmCost = payload.cumulative_cost
+    s.tokensUsed = payload.cumulative_tokens
+    if (payload.progress_pct > 0) s.progressPct = payload.progress_pct
+  }
+
+  function setTaskResult(sessionId: number, payload: TaskResultPayload): void {
+    const s = sessions.value.get(sessionId)
+    if (!s) return
+    s.taskResult = payload
+  }
+
   return {
     // state
     sessions,
@@ -290,5 +311,7 @@ export const useSessionsStore = defineStore('sessions', () => {
     setPageInfo,
     updateLastSeq,
     appendThought,
+    updateMetrics,
+    setTaskResult,
   }
 })

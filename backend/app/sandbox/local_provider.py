@@ -168,3 +168,92 @@ class LocalPlaywrightProvider(SandboxProvider):
     def get_context(self, session_id: int) -> Any | None:
         """获取指定 Session 的 BrowserContext（内部使用）"""
         return self._contexts.get(session_id)
+
+    # ================================================================
+    # 持久化（Phase 10: Browser Persistence）
+    # ================================================================
+
+    async def persist_context(self, session_id: int) -> bool:
+        """
+        持久化 Session 的浏览器上下文（cookies/storage）到文件
+
+        Returns:
+            True 如果成功
+        """
+        context = self._contexts.get(session_id)
+        if not context:
+            logger.warning("persist_context: Session %d 无活跃 Context", session_id)
+            return False
+
+        import json
+        import os
+
+        persist_dir = os.path.join("data", "browser_snapshots", str(session_id))
+        os.makedirs(persist_dir, exist_ok=True)
+
+        try:
+            # 保存 cookies
+            cookies = await context.cookies()
+            with open(os.path.join(persist_dir, "cookies.json"), "w") as f:
+                json.dump(cookies, f)
+
+            # 保存 localStorage（通过 page evaluate）
+            pages = context.pages
+            storage: dict[str, dict[str, str]] = {}
+            for i, page in enumerate(pages):
+                try:
+                    items = await page.evaluate("JSON.stringify(localStorage)")
+                    storage[f"page_{i}"] = json.loads(items) if items else {}
+                except Exception:
+                    storage[f"page_{i}"] = {}
+
+            with open(os.path.join(persist_dir, "storage.json"), "w") as f:
+                json.dump(storage, f)
+
+            logger.info("Browser 上下文已持久化: session=%d, cookies=%d, pages=%d",
+                        session_id, len(cookies), len(storage))
+            return True
+        except Exception as exc:
+            logger.error("persist_context 失败: session=%d, error=%s", session_id, exc)
+            return False
+
+    async def restore_context(self, session_id: int) -> Any | None:
+        """
+        从文件恢复 Session 的浏览器上下文
+
+        Returns:
+            BrowserContext 实例或 None
+        """
+        import json
+        import os
+
+        persist_dir = os.path.join("data", "browser_snapshots", str(session_id))
+        cookies_path = os.path.join(persist_dir, "cookies.json")
+
+        if not os.path.exists(cookies_path):
+            logger.info("restore_context: 无持久化数据 session=%d", session_id)
+            return None
+
+        if not self._browser:
+            logger.warning("restore_context: 浏览器未启动 session=%d", session_id)
+            return None
+
+        try:
+            context = await self._browser.new_context(
+                viewport=self.viewport,
+                locale=self.locale,
+            )
+
+            # 恢复 cookies
+            with open(cookies_path) as f:
+                cookies = json.load(f)
+            if cookies:
+                await context.add_cookies(cookies)
+
+            self._contexts[session_id] = context
+            logger.info("Browser 上下文已恢复: session=%d, cookies=%d",
+                        session_id, len(cookies))
+            return context
+        except Exception as exc:
+            logger.error("restore_context 失败: session=%d, error=%s", session_id, exc)
+            return None

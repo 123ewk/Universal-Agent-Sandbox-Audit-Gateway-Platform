@@ -35,7 +35,7 @@ const approvalsStore = useApprovalsStore()
 const eventBus = new EventBus()
 eventBus.registerReducer('agent', (msg) => {
   // 按事件类型分发到 session 或 step reducer
-  if (msg.event.startsWith('agent.step.') || msg.event === 'agent.thought') {
+  if (msg.event.startsWith('agent.step.') || msg.event === 'agent.thought' || msg.event === 'agent.metrics') {
     createStepReducer(sessionsStore)(msg)
   } else {
     createSessionReducer(sessionsStore)(msg)

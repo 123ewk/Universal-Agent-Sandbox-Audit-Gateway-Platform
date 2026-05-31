@@ -5,12 +5,13 @@
  *       agent.completed / agent.failed / agent.cancelled
  * 写入：sessions store（SessionState 的生命周期）
  */
-import type { WSMessage, PlanStep, CostPayload } from '../event-types'
+import type { WSMessage, PlanStep, CostPayload, TaskResultPayload } from '../event-types'
 
 export interface SessionStoreLike {
   setSessionStatus(sessionId: number, status: string): void
   setPlanSteps(sessionId: number, steps: PlanStep[]): void
   setSessionResult(sessionId: number, status: string, cost: CostPayload, error: string | null): void
+  setTaskResult(sessionId: number, result: TaskResultPayload): void
 }
 
 export function createSessionReducer(store: SessionStoreLike) {
@@ -34,6 +35,7 @@ export function createSessionReducer(store: SessionStoreLike) {
 
       case 'agent.completed':
         store.setSessionResult(sessionId, 'completed', payload as unknown as CostPayload, null)
+        store.setTaskResult(sessionId, payload as unknown as TaskResultPayload)
         break
 
       case 'agent.failed':
@@ -43,6 +45,7 @@ export function createSessionReducer(store: SessionStoreLike) {
           payload as unknown as CostPayload,
           (payload.error as string) ?? 'Unknown error',
         )
+        store.setTaskResult(sessionId, payload as unknown as TaskResultPayload)
         break
 
       case 'agent.cancelled':

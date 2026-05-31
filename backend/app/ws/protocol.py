@@ -49,6 +49,7 @@ class EventType(str, Enum):
     AGENT_COMPLETED = "agent.completed"
     AGENT_FAILED = "agent.failed"
     AGENT_CANCELLED = "agent.cancelled"
+    AGENT_METRICS = "agent.metrics"
     AGENT_QUESTION = "agent.question"
     AGENT_QUESTION_ANSWERED = "agent.question.answered"
 
@@ -140,6 +141,20 @@ class CostPayload(BaseModel):
     total_steps: int = 0
 
 
+class MetricsPayload(BaseModel):
+    """LLM 实时指标 Payload（用于 agent.metrics 事件）"""
+    model_name: str = ""
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    latency_ms: int = 0
+    estimated_cost: str = "0"
+    step_number: int = 0
+    cumulative_cost: str = "0"
+    cumulative_tokens: int = 0
+    progress_pct: float = 0.0
+
+
 class ThoughtPayload(BaseModel):
     """Agent 思考过程 Payload"""
     thought: str = ""
@@ -156,6 +171,19 @@ class QuestionPayload(BaseModel):
     options: list[str] = Field(default_factory=list)
     context: dict[str, Any] = Field(default_factory=dict)
     step_number: int = 0
+
+
+class TaskResultPayload(BaseModel):
+    """任务完成结果 Payload"""
+    summary: str = Field(default="", description="执行摘要")
+    final_answer: str = Field(default="", description="Agent 最终回答")
+    artifacts: list[dict[str, Any]] = Field(default_factory=list, description="产物列表")
+    steps: list[dict[str, Any]] = Field(default_factory=list, description="步骤摘要")
+    browser_active: bool = Field(default=False, description="浏览器是否保持活跃")
+    extracted_data: dict[str, Any] = Field(default_factory=dict, description="提取的关键数据")
+    total_cost: str = Field(default="0", description="总费用")
+    total_tokens: int = Field(default=0, description="总 Token")
+    total_steps: int = Field(default=0, description="总步数")
 
 
 # ====================================================================
@@ -241,3 +269,7 @@ def agent_question(session_id: int, payload: QuestionPayload) -> WSMessage:
 
 def agent_question_answered(session_id: int, payload: dict[str, Any]) -> WSMessage:
     return make_message(EventType.AGENT_QUESTION_ANSWERED, session_id, payload)
+
+
+def task_result_msg(session_id: int, payload: TaskResultPayload) -> WSMessage:
+    return make_message(EventType.AGENT_COMPLETED, session_id, payload)

@@ -70,7 +70,7 @@ async function skipQuestion(questionId: number): Promise<void> {
         :key="idx"
         class="hc-thought-item"
       >
-        <div class="hc-thought-time">{{ new Date().toLocaleTimeString() }}</div>
+        <div class="hc-thought-time">Step {{ t.step_number || idx + 1 }}</div>
         <div class="hc-thought-text">{{ t.thought }}</div>
         <div class="hc-thought-meta">
           <span class="hc-confidence">
@@ -93,9 +93,8 @@ async function skipQuestion(questionId: number): Promise<void> {
       <p class="hc-hint">Agent 的思考过程将在此显示</p>
     </div>
 
-    <!-- Answer Input (shown when active question exists) -->
-    <div class="hc-answer" v-if="false">
-      <!-- Phase 10D: 轮询 pending questions 后显示 -->
+    <!-- Answer Input -->
+    <div class="hc-answer" v-if="latestThought && status === 'waiting_user'">
       <input
         v-model="answerText"
         class="input"
@@ -106,11 +105,11 @@ async function skipQuestion(questionId: number): Promise<void> {
         <button
           class="btn btn-primary"
           :disabled="submitting || !answerText.trim()"
-          @click="() => {}"
+          @click="answerQuestion(0, answerText)"
         >
           回答
         </button>
-        <button class="btn" @click="() => {}">跳过</button>
+        <button class="btn" :disabled="submitting" @click="skipQuestion(0)">跳过</button>
       </div>
     </div>
   </div>

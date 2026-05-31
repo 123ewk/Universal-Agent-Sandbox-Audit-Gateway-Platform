@@ -27,7 +27,7 @@ watch(() => thoughts.value.length, async () => {
     <div class="timeline-node" v-for="(t, idx) in thoughts" :key="idx">
       <div class="tl-dot" :class="{ 'tl-dot-latest': idx === thoughts.length - 1 }" />
       <div class="tl-content">
-        <div class="tl-time">{{ new Date().toLocaleTimeString() }}</div>
+        <div class="tl-time">Step {{ t.step_number || idx + 1 }}</div>
         <div class="tl-thought">{{ t.thought }}</div>
         <div class="tl-meta">
           <span class="tl-confidence">置信度 {{ Math.round(t.confidence * 100) }}%</span>

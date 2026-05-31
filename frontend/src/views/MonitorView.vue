@@ -27,6 +27,7 @@ import ToolPermissionPanel from '@/components/ToolPermissionPanel.vue'
 import BrowserPanel from '@/components/BrowserPanel.vue'
 import ArtifactPanel from '@/components/ArtifactPanel.vue'
 import ApprovalDialog from '@/components/ApprovalDialog.vue'
+import ResultPanel from '@/components/ResultPanel.vue'
 
 const props = defineProps<{ id: string }>()
 const sessionId = computed(() => Number(props.id))
@@ -57,16 +58,29 @@ onMounted(() => {
       <div class="mvs-left">
         <span class="mvs-session">Session #{{ sessionId }}</span>
         <StatusBadge v-if="session" :status="session.status" />
-        <span class="mvs-cost" v-if="session && session.llmCost !== '0'">
-          ${{ session.llmCost }}
-        </span>
       </div>
       <div class="mvs-right">
-        <span class="mvs-metric">
+        <!-- Real-time Metrics -->
+        <span class="mvs-metric" v-if="session?.metrics?.model_name" :title="'Model'">
+          {{ session.metrics.model_name }}
+        </span>
+        <span class="mvs-metric" v-if="session?.metrics">
+          Prompt {{ session.metrics.prompt_tokens }} / Comp {{ session.metrics.completion_tokens }}
+        </span>
+        <span class="mvs-metric" v-if="session?.metrics">
+          ${{ session.metrics.estimated_cost }}
+        </span>
+        <span class="mvs-metric" v-if="session?.metrics?.latency_ms">
+          {{ session.metrics.latency_ms }}ms
+        </span>
+        <span class="mvs-metric" v-else-if="session && session.llmCost !== '0'">
+          ${{ session.llmCost }}
+        </span>
+        <span class="mvs-metric mvs-step">
           Step {{ session?.totalStepsExecuted ?? 0 }}/{{ session?.planSteps.length || '?' }}
         </span>
         <span class="mvs-metric">{{ session?.progressPct ?? 0 }}%</span>
-        <span class="mvs-metric" v-if="session?.currentUrl" :title="session.currentUrl">
+        <span class="mvs-metric mvs-url" v-if="session?.currentUrl" :title="session.currentUrl">
           {{ session.currentUrl }}
         </span>
       </div>
@@ -107,18 +121,40 @@ onMounted(() => {
       <div class="mv-right">
         <BrowserPanel :session-id="sessionId" />
 
+        <!-- Result Panel -->
+        <ResultPanel v-if="session.taskResult" :result="session.taskResult" />
+
         <!-- Error -->
         <div v-if="session.errorMessage" class="card mv-error-card">
           <h4>错误信息</h4>
           <pre>{{ session.errorMessage }}</pre>
         </div>
 
-        <!-- Cost Summary -->
-        <div v-if="session.status === 'completed' || session.status === 'failed'" class="card mv-cost-card">
-          <h4>执行摘要</h4>
-          <div class="mv-cost-row"><span>LLM 费用</span><span>${{ session.llmCost }}</span></div>
-          <div class="mv-cost-row"><span>总步数</span><span>{{ session.totalStepsExecuted }}</span></div>
-          <div class="mv-cost-row"><span>Tokens</span><span>{{ session.tokensUsed.toLocaleString() }}</span></div>
+        <!-- Metrics Panel (always visible) -->
+        <div class="card mv-metrics-card">
+          <h4>Runtime Metrics</h4>
+          <div class="mv-cost-row" v-if="session.metrics?.model_name">
+            <span>模型</span><span class="mv-mono">{{ session.metrics.model_name }}</span>
+          </div>
+          <div class="mv-cost-row" v-if="session.metrics">
+            <span>Prompt Tokens</span><span class="mv-mono">{{ session.metrics.prompt_tokens.toLocaleString() }}</span>
+          </div>
+          <div class="mv-cost-row" v-if="session.metrics">
+            <span>Completion Tokens</span><span class="mv-mono">{{ session.metrics.completion_tokens.toLocaleString() }}</span>
+          </div>
+          <div class="mv-cost-row">
+            <span>Total Tokens</span>
+            <span class="mv-mono">{{ (session.metrics?.total_tokens || session.tokensUsed).toLocaleString() }}</span>
+          </div>
+          <div class="mv-cost-row" v-if="session.metrics?.latency_ms">
+            <span>Latency</span><span class="mv-mono">{{ session.metrics.latency_ms }}ms</span>
+          </div>
+          <div class="mv-cost-row">
+            <span>Cost</span><span class="mv-mono">${{ session.metrics?.cumulative_cost || session.llmCost }}</span>
+          </div>
+          <div class="mv-cost-row">
+            <span>Steps</span><span class="mv-mono">{{ session.totalStepsExecuted }}/{{ session.planSteps.length || '?' }}</span>
+          </div>
         </div>
       </div>
 
@@ -162,6 +198,9 @@ onMounted(() => {
 .mvs-cost { font-size: 12px; font-family: var(--font-mono); color: var(--success); }
 .mvs-right { display: flex; align-items: center; gap: 14px; }
 .mvs-metric { font-size: 11px; color: var(--text-secondary); font-family: var(--font-mono); max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mvs-metric.mvs-step { max-width: 100px; }
+.mvs-metric.mvs-url { max-width: 180px; }
+.mv-mono { font-family: var(--font-mono); }
 
 /* Progress */
 .mv-progress { height: 2px; background: var(--border); }
@@ -221,6 +260,8 @@ onMounted(() => {
 .mv-error-card { }
 .mv-error-card h4 { font-size: 10px; font-weight: 600; color: var(--text-secondary); text-transform: uppercase; margin-bottom: 6px; }
 .mv-error-card pre { font-size: 11px; color: var(--danger); white-space: pre-wrap; font-family: var(--font-mono); }
+.mv-metrics-card { }
+.mv-metrics-card h4 { font-size: 10px; font-weight: 600; color: var(--text-secondary); text-transform: uppercase; margin-bottom: 6px; }
 .mv-cost-card h4 { font-size: 10px; font-weight: 600; color: var(--text-secondary); text-transform: uppercase; margin-bottom: 6px; }
 .mv-cost-row { display: flex; justify-content: space-between; padding: 3px 0; font-size: 11px; font-family: var(--font-mono); }
 .mv-cost-row span:first-child { color: var(--text-secondary); }

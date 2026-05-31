@@ -25,6 +25,7 @@ from typing import Any, Optional
 from app.agent.graph import AgentGraph
 from app.agent.llm import LLMClient
 from app.agent.state import AgentState
+from app.config import settings
 from app.engine.gateway import AuditGateway
 from app.runtime.event_bus import get_event_bus
 from app.runtime.session_manager import get_session_manager
@@ -129,25 +130,51 @@ class AgentRuntime:
             # 持久化到 PostgreSQL
             await _persist_session(session_id, state)
 
-            # 完成事件
+            # 完成事件（含 TaskResult）
+            from app.ws.protocol import TaskResultPayload, task_result_msg
+
+            # 构建步骤摘要
+            steps_summary = []
+            for rec in state.execution_history:
+                steps_summary.append({
+                    "step": rec.step_number,
+                    "skill": rec.plan_step.skill_name,
+                    "success": rec.success,
+                    "time_ms": rec.execution_time_ms,
+                    "tokens": rec.tokens_used,
+                    "cost": str(rec.llm_cost),
+                })
+
+            # 构建最终回答（从 observation 提取）
+            final_answer = state.observation_summary or (
+                state.last_step.plan_step.expected_outcome if state.last_step else ""
+            )
+
+            result_payload = TaskResultPayload(
+                summary=f"执行 {state.total_steps_executed} 步，共 {state.total_tokens_used} tokens，费用 ${state.total_llm_cost}",
+                final_answer=str(final_answer)[:1000],
+                steps=steps_summary,
+                browser_active=not settings.SANDBOX_AUTO_CLOSE,
+                total_cost=str(state.total_llm_cost),
+                total_tokens=state.total_tokens_used,
+                total_steps=state.total_steps_executed,
+            )
+
             if state.agent_status.value == "completed":
                 await bus.dispatch(
                     session_id,
                     "agent.completed",
-                    {
-                        "total_steps": state.total_steps_executed,
-                        "tokens_used": state.total_tokens_used,
-                        "llm_cost": str(state.total_llm_cost),
-                    },
+                    result_payload.model_dump(),
                     seq=wsm.get_current_seq(session_id) + 1,
                 )
             else:
+                result_payload.summary = f"执行失败: {state.error_message or '未知错误'}"
                 await bus.dispatch(
                     session_id,
                     "agent.failed",
                     {
+                        **result_payload.model_dump(),
                         "error": state.error_message or "未知错误",
-                        "total_steps": state.total_steps_executed,
                     },
                     seq=wsm.get_current_seq(session_id) + 1,
                 )

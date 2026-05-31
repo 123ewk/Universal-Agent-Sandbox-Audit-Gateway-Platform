@@ -487,6 +487,22 @@ class AgentGraph:
             started_at=started_at,
         )
 
+        # 推送 step.started 事件（让前端开始计时）
+        if self.ws_manager:
+            await self.ws_manager.broadcast_message(
+                state.session_id,
+                {
+                    "session_id": state.session_id,
+                    "event": "agent.step.started",
+                    "timestamp": started_at.isoformat(),
+                    "payload": {
+                        "step_number": step.step_number,
+                        "skill_name": step.skill_name,
+                        "description": step.description,
+                    },
+                },
+            )
+
         try:
             # 通过 AuditGateway 安全执行
             result = await self.gateway.invoke(
@@ -550,6 +566,27 @@ class AgentGraph:
             "[Execute] Step %d 完成: success=%s, time=%dms",
             step.step_number, record.success, record.execution_time_ms,
         )
+
+        # 推送实时 metrics 到前端
+        if self.ws_manager:
+            from app.ws.protocol import MetricsPayload
+            await self.ws_manager.broadcast_message(
+                state.session_id,
+                {
+                    "session_id": state.session_id,
+                    "event": "agent.metrics",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "payload": MetricsPayload(
+                        model_name=self.llm.model_name if hasattr(self.llm, "model_name") else "",
+                        step_number=step.step_number,
+                        estimated_cost=str(record.llm_cost),
+                        cumulative_cost=str(state.total_llm_cost),
+                        cumulative_tokens=state.total_tokens_used,
+                        progress_pct=state.progress_pct,
+                        latency_ms=record.execution_time_ms,
+                    ).model_dump(),
+                },
+            )
 
         # Phase 7: WebSocket 推送步骤完成事件
         if self.ws_manager:
@@ -762,11 +799,17 @@ class AgentGraph:
         # 调用 LLM 评估
         try:
             reflect_prompt = self.prompt_builder.build_reflect_prompt(state)
-            decision = await self.llm.reflect(reflect_prompt)
+            reflect_response = await self.llm.chat(
+                [{"role": "user", "content": reflect_prompt}],
+                tools=None, tool_choice="none",
+            )
+            state.add_cost(reflect_response.cost, reflect_response.tokens_used)
+            decision = self.llm._extract_json_object(reflect_response.content)
 
             decision_type = decision.get("decision", "continue")
             reason = decision.get("reason", "")
-            logger.info("[Reflect] LLM 决策: %s — %s", decision_type, reason)
+            logger.info("[Reflect] LLM 决策: %s — %s (cost=$%s, tokens=%d)",
+                        decision_type, reason, reflect_response.cost, reflect_response.tokens_used)
 
         except Exception as exc:
             logger.error("[Reflect] LLM 评估失败: %s, 默认 continue", exc)
